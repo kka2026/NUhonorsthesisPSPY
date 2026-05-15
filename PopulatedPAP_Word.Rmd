@@ -1,0 +1,3875 @@
+---
+title: "Populated PAP"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+This study is an expansion of an earlier pilot study by the authors, of which the results were used to generate the secondary hypotheses and exploratory analysis plan, in addition to the defined planned contrasts. All primary hypotheses remain identical to that of the pilot study, with the inclusion of hypotheses for the Democratic portion of the sample, as the pilot study sampled solely Republicans. All participants will be newly sampled from Prolific so as to avoid repeated exposure to the treatment.
+``` {r, include=FALSE}
+# ============================================================================================================================
+#                                                              CLEANING
+# ===========================================================================================================================
+# 0. load library
+library(readxl)
+library(tidyverse)
+library(psych)
+library(interactions)
+library(broom)
+library(emmeans)
+library(janitor)
+
+# 1.1 LOAD
+qualtrics <- read_csv("/Users/katiekeil/Desktop/Northwestern/Honors/R/FIRST RUN-THRU 3:14/MAIN+Honors+Thesis_March+13,+2026_23.52.csv")   # or read_excel()
+prolific   <- read_csv("/Users/katiekeil/Desktop/Northwestern/Honors/R/FIRST RUN-THRU 3:14/prolific_demographic_export_699cd03a5f7c64e418b72a8b.csv")
+
+# 1.1. CLEAN PROLIFIC IDs — strip whitespace, standardise case
+qualtrics <- qualtrics %>%
+  mutate(PROLIFIC_PID = str_trim(str_to_lower(PROLIFIC_PID)))
+prolific <- prolific %>%
+  mutate(participant_id = str_trim(str_to_lower(`Participant id`)))
+
+# 2. join
+data_raw <- qualtrics %>%
+  inner_join(prolific, by = c("PROLIFIC_PID" = "participant_id"))
+data_raw <- data_raw[-1, ]
+
+# 3. create party scale variables
+        # *if PID_general == 2 then go off of strong-weak PID
+        # **if PID_general == 3 then go off of ind_lean
+data_group <- data_raw %>%
+  mutate(
+    across(-c(condition:PID), ~ suppressWarnings(as.numeric(as.character(.)))),
+    party_numeric = case_when(
+      PID_general == 2 & strong_weak == 2 ~ 7,
+      PID_general == 2 & strong_weak == 1 ~ 6,
+      PID_general == 3 & ind_lean == 3 ~ 5,
+      PID_general == 3 & ind_lean == 2 ~ 4,
+      PID_general == 3 & ind_lean == 1 ~ 3,
+      PID_general == 1 & strong_weak == 1 ~ 2,
+      PID_general == 1 & strong_weak == 2 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    party_scale = factor(party_numeric, 
+                         levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D", "Weak D", "Lean D", 
+                                    "Lean R", 
+                                    "Weak R", "Strong R")),
+    
+# 4. create bigger party groupings
+    party_bin = case_when(
+      party_numeric >= 6 ~ 2,
+      party_numeric <= 2 ~ 1,
+      party_numeric >=3 & party_numeric <=5 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    party_category = factor(party_bin, 
+                            levels = 0:2,
+                            labels = c("Independent", "Democrat", "Republican")),
+    PID_dummy = case_when(
+      PID == "Democrat" ~ 0,
+      PID == "Republican" ~ 1,
+      TRUE ~ NA_real_
+    ),
+
+# 5. add in MAGA
+    maga = replace_na(maga, 0),
+    maga_category = factor(maga, 
+                           levels = 0:1,
+                           labels = c("Non-MAGA", "MAGA")),
+    ideology = factor(ideology_selfreport, 
+                      levels = 1:7,
+                      labels = c("Very liberal", "Somewhat liberal", "Slightly liberal", 
+                                 "Moderate", "Slightly conservative", 
+                                 "Somewhat conservative", "Very conservative")),
+
+# 6. EXPERIMENTAL GROUPINGS
+    # recode treatment groups from characters to numeric
+    condition_dummy = case_when(
+      condition == "control" ~ 0,
+      condition == "treatment" ~ 1,
+      TRUE ~ NA_real_),
+    # create group variables for condition x speaker party
+    exp_group_numeric = case_when(
+      condition == "control" & party_numeric >= 5 ~ 1,
+      condition == "control" & party_numeric <= 3 ~ 2,
+      condition == "treatment" & party_numeric >=5 ~ 3,
+      condition == "treatment" & party_numeric <=3 ~ 4,
+      TRUE ~ NA_real_
+    ),
+    exp_group_category = factor(exp_group_numeric, 
+                                levels = 1:4,
+                                labels = c("Control R", "Control D", 
+                                           "Treatment R", "Treatment D")),
+    
+    # dummy for match (exp_group is 4 or 5) or no match (exp_group is 3 or 6)
+    speaker_match = case_when(
+      exp_group_numeric == 3 ~ 1,
+      exp_group_numeric == 4 ~ 0,
+      exp_group_numeric == 1 ~ 0,
+      exp_group_numeric == 2 ~ 0,
+      TRUE ~ NA_real_
+    ),
+    # clump conditions by match or no match
+    exp_group = case_when(
+      condition_dummy == 0 ~ 0,
+      condition_dummy == 1 & speaker_match == 0 ~ 1,
+      condition_dummy == 1 & speaker_match == 1 ~ 2,
+      TRUE ~ NA_real_
+    ),
+    exp_group_labels = factor(exp_group,levels = c(0:2),
+                              labels = c("Control", "Mismatch", "Match")),
+
+# 7. convert all columns except categories to numeric
+    across(-c(condition, PID, party_scale, party_category, maga_category, ideology, exp_group_category, exp_group_labels),
+           ~as.numeric(as.character(.))))
+
+# 8. filter out failed attention checks
+data_filter <- data_group %>%
+  filter(attn1 == 2 | party_numeric == 4)
+
+# 9. RENAMING SCALE VARIABLES 
+data_rename <- data_filter %>%
+  mutate(
+    
+    # 9.1: FT RENAMING
+    ft_rep_pre = ft_rep_pre_1,
+    ft_dem_pre = ft_dem_pre_1,
+    ft_rep_post = ft_rep_post_1,
+    ft_dem_post = ft_dem_post_1,
+    
+    # 9.2: SPV RENAMING
+      # A: INDIVIDUAL
+         # 1: REPUBLICANS
+              spv_Rprotest = spv_Rprotest_1,
+              spv_Rvandalize = spv_Rvandalize_1,
+              spv_Rmessage = spv_Rmessage_1,
+              spv_Rassault = spv_Rassault_1,
+              spv_Rjustify = spv_Rjustify_1,
+              spv_Rpredict = spv_Rpredict_1,
+         # 2: DEMOCRATS
+              spv_Dprotest = spv_Dprotest_1,
+              spv_Dvandalize = spv_Dvandalize_1,
+              spv_Dmessage = spv_Dmessage_1,
+              spv_Dassault = spv_Dassault_1,
+              spv_Djustify = spv_Djustify_1,
+              spv_Dpredict = spv_Dpredict_1,
+    # B: META
+             # 1: REPUBLICANS
+              metaSPV_Rprotest = metaSPV_Rprotest_1,
+              metaSPV_Rvandalize = metaSPV_Rvandalize_1,
+              metaSPV_Rmessage = metaSPV_Rmessage_1,
+              metaSPV_Rassault = metaSPV_Rassault_1,
+              metaSPV_Rjustify = metaSPV_Rjustify_1,
+              metaSPV_Rpredict = metaSPV_Rpredict_1,
+             # 2: DEMOCRATS
+              metaSPV_Dprotest = metaSPV_Dprotest_1,
+              metaSPV_Dvandalize = metaSPV_Dvandalize_1,
+              metaSPV_Dmessage = metaSPV_Dmessage_1,
+              metaSPV_Dassault = metaSPV_Dassault_1,
+              metaSPV_Djustify = metaSPV_Djustify_1,
+              metaSPV_Dpredict = metaSPV_Dpredict_1)
+
+# 10. COMPILED AND CLEANED 
+data_clean <- data_rename %>%
+  mutate(
+    # 10.1: STRENGTH OF PID
+        # A: add column for average of PID strength questions based on party ID
+            PID_strength = case_when(
+              PID_general == 2 ~ rowMeans(across(PID_strengthR_1:PID_strengthR_4)),
+              PID_general == 3 & ind_lean == 3 ~ rowMeans(across(PID_strengthR_1:PID_strengthR_4)),
+              PID_general == 1 ~ rowMeans(across(PID_strengthD_1:PID_strengthD_4)),
+              PID_general == 3 & ind_lean == 1 ~ rowMeans(across(PID_strengthD_1:PID_strengthD_4)),
+              TRUE ~ NA_real_
+            ),
+        # B: create bins for PID strength
+        PID_bin_category = case_when(
+          PID_strength >= 3 ~ "strong",
+          PID_strength <= 1.5 ~ "weak",
+          PID_strength <3 & PID_strength >1.5 ~ "medium",
+          TRUE ~ NA_character_
+        ),
+        # C: numeric version of above
+        PID_bin = case_when(
+          PID_strength >= 3 ~ 2,
+          PID_strength <= 1.5 ~ 0,
+          PID_strength <3 & PID_strength > 1.5 ~ 1,
+          TRUE ~ NA_real_),
+    
+    # 10.2: SOCIAL CLOSENESS SCALE
+    social_closeness = case_when(
+      PID_general == 2 ~ rowMeans(across(sc1_D:sc3_D)),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(sc1_D:sc3_D)),
+      PID_general == 1 ~ rowMeans(across(sc1_R:sc3_R)),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(sc1_R:sc3_R)),
+      TRUE ~ NA_real_),
+    
+    # 10.3: EMOTIONS
+    angry_dummy = ifelse(is.na(emotion_table_1), 0, emotion_table_1),
+    shame_dummy = ifelse(is.na(emotion_table_2), 0, emotion_table_2),
+    guilt_dummy = ifelse(is.na(emotion_table_3), 0, emotion_table_3),
+    disgust_dummy = ifelse(is.na(emotion_table_4), 0, emotion_table_4),
+    fear_dummy = ifelse(is.na(emotion_table_5), 0, emotion_table_5),
+    anxiety_dummy = ifelse(is.na(emotion_table_6), 0, emotion_table_6),
+    sadness_dummy = ifelse(is.na(emotion_table_7), 0, emotion_table_7),
+    happiness_dummy = ifelse(is.na(emotion_table_8), 0, emotion_table_8),
+    none_dummy = ifelse(is.na(emotion_table_9), 0, emotion_table_9),
+    
+    # 10.4: IN-PARTY FEELING THERMOMETERS
+    ft_pre_in = case_when(
+      PID_general == 2 ~ ft_rep_pre,
+      PID_general == 3 & ind_lean == 3 ~ ft_rep_pre,
+      PID_general == 1 ~ ft_dem_pre,
+      PID_general == 3 & ind_lean == 1 ~ ft_dem_pre,
+      TRUE ~ NA_real_),
+    ft_post_in = case_when(
+      PID_general == 2 ~ ft_rep_post,
+      PID_general == 3 & ind_lean == 3 ~ ft_rep_post,
+      PID_general == 1 ~ ft_dem_post,
+      PID_general == 3 & ind_lean == 1 ~ ft_dem_post,
+      TRUE ~ NA_real_),
+    
+    # 10.5: OUT-PARTY FEELING THERMOMETERS
+    ft_pre_out = case_when(
+      PID_general == 2 ~ ft_dem_pre,
+      PID_general == 3 & ind_lean == 3 ~ ft_dem_pre,
+      PID_general == 1 ~ ft_rep_pre,
+      PID_general == 3 & ind_lean == 1 ~ ft_rep_pre,
+      TRUE ~ NA_real_),
+    ft_post_out = case_when(
+      PID_general == 2 ~ ft_dem_post,
+      PID_general == 3 & ind_lean == 3 ~ ft_dem_post,
+      PID_general == 1 ~ ft_rep_post,
+      PID_general == 3 & ind_lean == 1 ~ ft_rep_post,
+      TRUE ~ NA_real_),
+    
+    # 10.6: DIFFERENCES BETWEEN PRE- AND POST PID
+        # A: difference in ft_pre_R v. ft_post_R
+          ft_diff_R = ft_rep_post - ft_rep_pre,
+        # B: difference in ft_pre_D v. ft_post_D
+          ft_diff_D = ft_dem_post - ft_dem_pre,
+        # C: difference in differences
+          ft_diff_diff_PID = ft_diff_R - ft_diff_D,
+    
+    # 10.7: DIFFERENCES BETWEEN PRE- AND POST IN V. OUT-PARTY
+        # A: difference in ft_pre_in v. ft_post_in
+          ft_diff_in = ft_post_in - ft_pre_in,
+        # B: difference in ft_pre_out v. ft_post_out
+          ft_diff_out = ft_post_out - ft_pre_out,
+        # C: difference in differences
+          ft_diff_diff_inout = ft_diff_in - ft_diff_out,
+    
+    # 10.8: moral disengagement scores for outgroup
+    moral_disengagement_outgroup = case_when(
+      PID_general == 2 ~ rowMeans(across(md_D1:md_D3)),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(md_D1:md_D3)),
+      PID_general == 1 ~ rowMeans(across(md_R1:md_R3)), 
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(md_R1:md_R3)),
+      TRUE ~ NA_real_),
+    
+    # 10.9: INDIVIDUAL SPV
+    SPV_individual = case_when(
+      # if Republican participant (PID_general == 2, OR if PID_general == 3 then ind_lean == 1)
+            # calculate mean across 4 SPV questions
+      PID_general == 2 ~ rowMeans(across(c(spv_Rprotest, spv_Rvandalize, spv_Rmessage,
+                                           spv_Rassault, spv_Rjustify, spv_Rpredict))),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(spv_Rprotest, spv_Rvandalize, spv_Rmessage,
+                                                           spv_Rassault, spv_Rjustify, spv_Rpredict))),
+      # if Democratic participant (PID_general == 1, OR if PID_general == 3 then ind_lean == 3)
+            # calculate mean across 4 SPV questions
+      PID_general == 1 ~ rowMeans(across(c(spv_Dprotest, spv_Dvandalize, spv_Dmessage,
+                                           spv_Dassault, spv_Djustify, spv_Dpredict))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(spv_Dprotest, spv_Dvandalize, spv_Dmessage,
+                                                           spv_Dassault, spv_Djustify, spv_Dpredict))),
+      TRUE ~ NA_real_),
+    
+    # 10.10: META-PERCEPTIONS OF SPV
+    SPV_meta_R = case_when(
+      PID_general == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                           metaSPV_Dassault, metaSPV_Djustify, metaSPV_Dpredict))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                                           metaSPV_Dassault, metaSPV_Djustify, metaSPV_Dpredict))),
+      PID_general == 2 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                           metaSPV_Rassault, metaSPV_Rjustify, metaSPV_Rpredict)), na.rm = TRUE),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                                           metaSPV_Rassault, metaSPV_Rjustify, metaSPV_Rpredict))),
+      TRUE ~ NA_real_),
+    SPV_meta_outgroup = case_when(
+      PID_general == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                           metaSPV_Dassault, metaSPV_Djustify, metaSPV_Dpredict))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                                           metaSPV_Dassault, metaSPV_Djustify, metaSPV_Dpredict))),
+      TRUE ~ NA_real_),
+    SPV_meta_ingroup = case_when(
+      PID_general == 2 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                           metaSPV_Rassault, metaSPV_Rjustify, metaSPV_Rpredict)), na.rm = TRUE),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                                           metaSPV_Rassault, metaSPV_Rjustify, metaSPV_Rpredict))),
+      TRUE ~ NA_real_),
+    
+    # 10.11: SPV BINS BY QUESTION GROUPS
+    SPV_indiv_scenario = case_when(
+      PID_general == 2 ~ rowMeans(across(c(spv_Rprotest, spv_Rvandalize, spv_Rmessage,
+                                           spv_Rassault))),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(spv_Rprotest, spv_Rvandalize, spv_Rmessage,
+                                                           spv_Rassault))),
+      PID_general == 1 ~ rowMeans(across(c(spv_Dprotest, spv_Dvandalize, spv_Dmessage,
+                                           spv_Dassault))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(spv_Dprotest, spv_Dvandalize, spv_Dmessage,
+                                                           spv_Dassault))),
+      TRUE ~ NA_real_),
+    SPV_indiv_broad = case_when(
+      PID_general == 2 ~ rowMeans(across(c(spv_Rjustify, spv_Rpredict))),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(spv_Rjustify, spv_Rpredict))),
+      PID_general == 1 ~ rowMeans(across(c( spv_Djustify, spv_Dpredict))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(spv_Djustify, spv_Dpredict))),
+      TRUE ~ NA_real_),
+    SPV_meta_scenario = case_when(
+      PID_general == 2 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                           metaSPV_Rassault))),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(metaSPV_Rprotest, metaSPV_Rvandalize, metaSPV_Rmessage,
+                                                           metaSPV_Rassault))),
+      PID_general == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                           metaSPV_Dassault))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(metaSPV_Dprotest, metaSPV_Dvandalize, metaSPV_Dmessage,
+                                                           metaSPV_Dassault))),
+      TRUE ~ NA_real_),
+    SPV_meta_broad = case_when(
+      PID_general == 2 ~ rowMeans(across(c(metaSPV_Rjustify, metaSPV_Rpredict))),
+      PID_general == 3 & ind_lean == 3 ~ rowMeans(across(c(metaSPV_Rjustify, metaSPV_Rpredict))),
+      PID_general == 1 ~ rowMeans(across(c( metaSPV_Djustify, metaSPV_Dpredict))),
+      PID_general == 3 & ind_lean == 1 ~ rowMeans(across(c(metaSPV_Djustify, metaSPV_Dpredict))),
+      TRUE ~ NA_real_),
+    
+    # 10.12: SPV (indiv) BY TYPE OF ACTION
+    SPV_indiv_protest = case_when(
+      PID_general == 2 ~ spv_Rprotest,
+      PID_general == 3 & ind_lean == 3 ~ spv_Rprotest,
+      PID_general == 1 ~ spv_Dprotest,
+      PID_general == 3 & ind_lean == 1 ~ spv_Dprotest,
+      TRUE ~ NA_real_),
+    SPV_indiv_vandalize = case_when(
+      PID_general == 2 ~ spv_Rvandalize,
+      PID_general == 3 & ind_lean == 3 ~ spv_Rvandalize,
+      PID_general == 1 ~ spv_Dvandalize, 
+      PID_general == 3 & ind_lean == 1 ~ spv_Dvandalize,
+      TRUE ~ NA_real_),
+    SPV_indiv_message = case_when(
+      PID_general == 2 ~ spv_Rmessage, 
+      PID_general == 3 & ind_lean == 3 ~ spv_Rmessage, 
+      PID_general == 1 ~ spv_Dmessage, 
+      PID_general == 3 & ind_lean == 1 ~ spv_Dmessage,
+      TRUE ~ NA_real_),
+    SPV_indiv_assault = case_when(
+      PID_general == 2 ~ spv_Rassault, 
+      PID_general == 3 & ind_lean == 3 ~ spv_Rassault,
+      PID_general == 1 ~ spv_Dassault, 
+      PID_general == 3 & ind_lean == 1 ~ spv_Dassault,
+      TRUE ~ NA_real_),
+    SPV_indiv_justify = case_when(
+      PID_general == 2 ~ spv_Rjustify,
+      PID_general == 3 & ind_lean == 3 ~ spv_Rjustify, 
+      PID_general == 1 ~ spv_Djustify, 
+      PID_general == 3 & ind_lean == 1 ~ spv_Djustify,
+      TRUE ~ NA_real_),
+    SPV_indiv_predict = case_when(
+      PID_general == 2 ~ spv_Rpredict, 
+      PID_general == 3 & ind_lean == 3 ~ spv_Rpredict, 
+      PID_general == 1 ~ spv_Dpredict, 
+      PID_general == 3 & ind_lean == 1 ~ spv_Dpredict,
+      TRUE ~ NA_real_),
+    
+    # 10.13: SPV (meta) BY TYPE OF ACTION
+    SPV_meta_protest = case_when(
+      PID_general == 2 ~ metaSPV_Rprotest,
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rprotest,
+      PID_general == 1 ~ metaSPV_Dprotest,
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Dprotest,
+      TRUE ~ NA_real_),
+    SPV_meta_vandalize = case_when(
+      PID_general == 2 ~ metaSPV_Rvandalize,
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rvandalize,
+      PID_general == 1 ~ metaSPV_Dvandalize, 
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Dvandalize,
+      TRUE ~ NA_real_),
+    SPV_meta_message = case_when(
+      PID_general == 2 ~ metaSPV_Rmessage, 
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rmessage, 
+      PID_general == 1 ~ metaSPV_Dmessage, 
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Dmessage,
+      TRUE ~ NA_real_),
+    SPV_meta_assault = case_when(
+      PID_general == 2 ~ metaSPV_Rassault, 
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rassault,
+      PID_general == 1 ~ metaSPV_Dassault, 
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Dassault,
+      TRUE ~ NA_real_),
+    SPV_meta_justify = case_when(
+      PID_general == 2 ~ metaSPV_Rjustify,
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rjustify, 
+      PID_general == 1 ~ metaSPV_Djustify, 
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Djustify,
+      TRUE ~ NA_real_),
+    SPV_meta_predict = case_when(
+      PID_general == 2 ~ metaSPV_Rpredict, 
+      PID_general == 3 & ind_lean == 3 ~ metaSPV_Rpredict, 
+      PID_general == 1 ~ metaSPV_Dpredict, 
+      PID_general == 3 & ind_lean == 1 ~ metaSPV_Dpredict,
+      TRUE ~ NA_real_))
+
+# 11. View data set!
+View(data_clean)
+
+
+# ============================================================================================================================
+#                                                              DEMOGRAPHICS
+# ============================================================================================================================
+library(readr)
+library(tidyverse)
+library(psych)
+library(interactions)
+library(broom)
+library(emmeans)
+library(janitor)
+
+demo_raw <- read_csv('/Users/katiekeil/Desktop/Northwestern/Honors/R/FIRST RUN-THRU 3:14/prolific_demographic_export_699cd03a5f7c64e418b72a8b.csv')
+View(demo_raw)
+
+demo_filter <- filter(demo_raw, Status == "APPROVED")
+View(demo_filter)
+
+demo_clean <- demo_filter %>%
+  mutate(across(-Age, ~as.character(.)),
+         trump_vote = ifelse(`2020 us presidential election` == "Donald Trump"
+                             & `2024 us presidential election` == "Donald Trump", 1, 0))
+View(demo_clean)
+
+cat_vars <- c(
+  "Gender",
+  "Ethnicity",
+  "Highest education level completed",
+  "Household income (usd) [us participants only]",
+  "Sex",
+  "2020 us presidential election",
+  "2024 us presidential election"
+)
+num_var <- "Age"
+cat_tables <- map_df(
+  cat_vars,
+  ~ demo_clean %>%
+    filter(!is.na(.data[[.x]])) %>%
+    count(Variable = .x, Category = .data[[.x]]) %>%
+    mutate(
+      Percent = round(100 * n / sum(n), 1),
+      N = n
+    ) %>%
+    select(Variable, Category, N, Percent)
+)
+num <- as.numeric(demo_clean[[num_var]])
+num_table <- tibble(
+  Variable = num_var,
+  Category = c("Mean (SD)", "Median", "Range"),
+  N = c(
+    sprintf("%.1f (%.1f)", mean(num, na.rm=TRUE), sd(num, na.rm=TRUE)),
+    sprintf("%.1f", median(num, na.rm=TRUE)),
+    sprintf("%d–%d", min(num, na.rm=TRUE), max(num, na.rm=TRUE))
+  ),
+  Percent = NA
+)
+cat_tables <- cat_tables %>%
+  mutate(N = as.character(N))
+demo_table <- bind_rows(cat_tables, num_table)
+
+library(gt)
+gt_table <- demo_table %>%
+  gt(
+    rowname_col = "Category",
+    groupname_col = "Variable"
+  ) %>%
+  tab_header(
+    title = "Table 4.5: Demographic Characteristics",
+    subtitle = "Frequencies, Percentages, and Summary Statistics"
+  ) %>%
+  cols_label(
+    N = "N",
+    Percent = "%"
+  ) %>%
+  fmt_percent(
+    columns = Percent,
+    scale_values = FALSE,
+    decimals = 1
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    row_group.as_column = TRUE,
+    data_row.padding = px(4)
+  )
+gt_table
+
+
+# ================================================================
+#                  PARTICIPANT COUNT TABLES
+# ================================================================
+# 1. BUILD EACH SECTION AS A LONG TIBBLE WITH Variable + Category + N + Percent
+
+# 1.1: BY CONDITION
+count_condition <- data_clean %>%
+  count(Variable = "Condition", Category = condition) %>%
+  mutate(Percent = round(100 * n / sum(n), 1),
+         N = as.character(n)) %>%
+  select(Variable, Category, N, Percent)
+
+# 1.2: BY PARTY BIN
+count_party_bin <- data_clean %>%
+  filter(!is.na(party_category)) %>%
+  count(Variable = "Party Group", Category = as.character(party_category)) %>%
+  mutate(Percent = round(100 * n / sum(n), 1),
+         N = as.character(n)) %>%
+  select(Variable, Category, N, Percent)
+
+# 1.3: BY 7-POINT PARTY ID
+count_party_numeric <- data_clean %>%
+  filter(!is.na(party_scale)) %>%
+  count(Variable = "7-Point Party ID", Category = as.character(party_scale)) %>%
+  mutate(Percent = round(100 * n / sum(n), 1),
+         N = as.character(n)) %>%
+  select(Variable, Category, N, Percent)
+
+# 2. BIND AND EXPORT AS SINGLE GT TABLE
+count_table <- bind_rows(count_condition, count_party_bin, count_party_numeric)
+
+gt_count <- count_table %>%
+  gt(
+    rowname_col  = "Category",
+    groupname_col = "Variable"
+  ) %>%
+  tab_header(
+    title    = "Table X: Participant Distribution",
+    subtitle = "Frequencies and Percentages by Condition and Party"
+  ) %>%
+  cols_label(
+    N       = "N",
+    Percent = "%"
+  ) %>%
+  fmt_percent(
+    columns      = Percent,
+    scale_values = FALSE,
+    decimals     = 1
+  ) %>%
+  tab_options(
+    table.font.size      = 12,
+    row_group.as_column  = TRUE,
+    data_row.padding     = px(4)
+  )
+
+gt_count
+```
+
+# Descriptive Analyses 
+I will perform a set of descriptive analyses intended to measure the exploratory relationship between each of our identified measures and condition assignment. I create one table comparing Democrats in the control condition to Democrats in the treatment condition on the basis of the mean and standard deviations for the following variables: partisan self-concept, self-reported ideology, the difference in feeling thermometer ratings between pre- and post-treatment for both parties, the difference between these affective differences, moral disengagement toward Republicans, individual levels of SPV, and meta-perceptions of Republicans’ SPV.
+``` {r, include=FALSE}
+# ============================================================================================================================
+#                                                              DESCRIPTIVE STATS
+# ===========================================================================================================================
+# 0. HELPER FUNCTION: correlation matrix with stars
+cor_with_stars <- function(df) {
+  n    <- ncol(df)
+  cols <- names(df)
+  # compute r and p for every pair
+  r_mat <- matrix(NA_real_,    n, n, dimnames = list(cols, cols))
+  p_mat <- matrix(NA_real_,    n, n, dimnames = list(cols, cols))
+  for (i in seq_len(n)) {
+    for (j in seq_len(n)) {
+      if (i == j) {
+        r_mat[i, j] <- 1
+        p_mat[i, j] <- NA
+      } else {
+        test         <- cor.test(df[[i]], df[[j]], use = "pairwise.complete.obs")
+        r_mat[i, j]  <- test$estimate
+        p_mat[i, j]  <- test$p.value
+      }}}
+  # paste stars onto rounded r values
+  star_mat <- matrix("", n, n, dimnames = list(cols, cols))
+  for (i in seq_len(n)) {
+    for (j in seq_len(n)) {
+      if (i == j) {
+        star_mat[i, j] <- "—"
+      } else {
+        r <- round(r_mat[i, j], 2)
+        p <- p_mat[i, j]
+        stars <- if (!is.na(p) && p < .001) "***" else
+          if (!is.na(p) && p < .01)  "**"  else
+            if (!is.na(p) && p < .05)  "*"   else ""
+        star_mat[i, j] <- paste0(sprintf("%.2f", r), stars) %>% 
+          str_replace_all("\\* \\* \\*", "***") %>%
+          str_replace_all("\\* \\*", "**")}}}
+  as.data.frame(star_mat)}
+
+
+
+# 1. load library
+library(readxl)
+library(tidyverse)
+library(interactions)
+library(broom)
+library(emmeans)
+library(stargazer)
+library(modelsummary)
+
+# 2. compile list of descriptive stats
+descriptive_stats <- data_clean %>%
+  group_by(exp_group_numeric) %>%
+  dplyr::summarise(
+    mean_PID_strength        = mean(PID_strength, na.rm = TRUE),
+    sd_PID_strength          = sd(PID_strength, na.rm = TRUE),
+    mean_ideology_selfreport = mean(as.numeric(ideology_selfreport), na.rm = TRUE),
+    sd_ideology_selfreport   = sd(as.numeric(ideology_selfreport), na.rm = TRUE),
+    mean_ft_diff_R           = mean(ft_diff_R, na.rm = TRUE),
+    mean_ft_diff_D           = mean(ft_diff_D, na.rm = TRUE),
+    sd_ft_diff_R             = sd(ft_diff_R, na.rm = TRUE),
+    sd_ft_diff_D             = sd(ft_diff_D, na.rm = TRUE),
+    mean_ft_diff_diff        = mean(ft_diff_diff_PID, na.rm = TRUE),
+    sd_ft_diff_diff          = sd(ft_diff_diff_PID, na.rm = TRUE),
+    mean_moral_out           = mean(moral_disengagement_outgroup, na.rm = TRUE),
+    sd_moral_out             = sd(moral_disengagement_outgroup, na.rm = TRUE),
+    mean_SPV_individual      = mean(SPV_individual, na.rm = TRUE),
+    sd_SPV_individual        = sd(SPV_individual, na.rm = TRUE),
+    mean_SPV_meta_R          = mean(SPV_meta_R, na.rm = TRUE),
+    sd_SPV_meta_R            = sd(SPV_meta_R, na.rm = TRUE),
+    count                    = n(),
+    .groups = "drop")
+items <- list(
+  "Partisan Self-Concept"                   = c("mean_PID_strength", "sd_PID_strength"),
+  "Self-Reported Ideology"                          = c("mean_ideology_selfreport", "sd_ideology_selfreport"),
+  "Difference in Affective Ratings:\nRepublican Party" = c("mean_ft_diff_R", "sd_ft_diff_R"),
+  "Difference in Affective Ratings:\nDemocratic Party" = c("mean_ft_diff_D", "sd_ft_diff_D"),
+  "Difference in Affective Ratings Between Parties" = c("mean_ft_diff_diff", "sd_ft_diff_diff"),
+  "Moral Disengagement: Opposing Party"              = c("mean_moral_out", "sd_moral_out"),
+  "Individual SPV"                                  = c("mean_SPV_individual", "sd_SPV_individual"),
+  "Meta-Perceptions of Republican SPV"              = c("mean_SPV_meta_R", "sd_SPV_meta_R"),
+  "N"                                              = c("count", "count")
+)
+
+# ----------------------------------------------------------------
+#         HELPER: significance stars from t-test
+# ----------------------------------------------------------------
+get_stars <- function(group1_vals, group2_vals) {
+  test <- t.test(group1_vals, group2_vals)
+  p    <- test$p.value
+  if (p < .001) "***" else if (p < .01) "**" else if (p < .05) "*" else ""
+}
+
+# ----------------------------------------------------------------
+#         MAP ITEM LABELS TO RAW DATA_CLEAN COLUMN NAMES
+# ----------------------------------------------------------------
+item_cols <- list(
+  "partisan self-concept"                     = "PID_strength",
+  "Self-Reported Ideology"                            = "ideology_selfreport",
+  "Difference in Affective Ratings:\nRepublican Party" = "ft_diff_R",
+  "Difference in Affective Ratings:\nDemocratic Party" = "ft_diff_D",
+  "Difference in Affective Ratings Between Parties"   = "ft_diff_diff_PID",
+  "Moral Disengagement: Opposing Party"               = "moral_disengagement_outgroup",
+  "Individual SPV"                                    = "SPV_individual",
+  "Meta-Perceptions of Republican SPV"                = "SPV_meta_R"
+)
+
+# ----------------------------------------------------------------
+#         COMPUTE STARS
+# ----------------------------------------------------------------
+stars_R <- sapply(names(item_cols), function(label) {
+  col <- item_cols[[label]]
+  get_stars(
+    na.omit((data_clean %>% filter(exp_group_numeric == 1))[[col]]),
+    na.omit((data_clean %>% filter(exp_group_numeric == 3))[[col]])
+  )
+})
+
+stars_D <- sapply(names(item_cols), function(label) {
+  col <- item_cols[[label]]
+  get_stars(
+    na.omit((data_clean %>% filter(exp_group_numeric == 2))[[col]]),
+    na.omit((data_clean %>% filter(exp_group_numeric == 4))[[col]])
+  )
+})
+
+```
+``` {r}
+# 4.1: make groups
+gD_control <- 2
+gD_treat <- 4
+D_control <- descriptive_stats %>% filter(exp_group_numeric == gD_control)
+D_treat <- descriptive_stats %>% filter(exp_group_numeric == gD_treat)
+# 4.2: form column structure
+dem_rows <- lapply(names(items), function(label) {
+  cols    <- items[[label]]
+  mean_col <- cols[1]; sd_col <- cols[2]
+# 4.3: how to pull means and SDs for each column         
+  valD_control <- if (!is.na(D_control[[mean_col]])) {
+    if (mean_col == "count") sprintf("%d", D_control[[mean_col]]) else sprintf("%.2f (%.2f)", D_control[[mean_col]], D_control[[sd_col]])
+  } else NA_character_
+  star <- if (label %in% names(stars_D)) stars_D[[label]] else ""
+  valD_treat <- if (!is.na(D_treat[[mean_col]])) {
+    if (mean_col == "count") sprintf("%d", D_treat[[mean_col]])
+    else sprintf("%.2f (%.2f)%s", D_treat[[mean_col]], D_treat[[sd_col]], star)
+  } else NA_character_
+# 4.4: bind into table         
+  tibble::tibble(Variable = label, Group_D_control = valD_control, Group_D_treat = valD_treat)
+}) %>% dplyr::bind_rows()
+# 4.5: make the labels for table and fill in      
+nD_control <- D_control %>% pull(count) %>% unique()
+nD_treat <- D_treat %>% pull(count) %>% unique()
+colnames(dem_rows)[2:3] <- c(
+  paste0("Control x Democrat"),
+  paste0("Treatment x Democrat"))
+```
+``` {r, echo = FALSE}
+knitr::kable(dem_rows, format = "pipe")
+```
+
+I will create a second table comparing Republicans in the control condition to Republicans in the treatment condition across the same set of variables.
+``` {r}
+# 3.1: make groups
+gR_control <- 2
+gR_treat <- 4
+R_control <- descriptive_stats %>% filter(exp_group_numeric == gR_control)
+R_treat <- descriptive_stats %>% filter(exp_group_numeric == gR_treat)
+# 3.2: form column structure
+rep_rows <- lapply(names(items), function(label) {
+  cols    <- items[[label]]
+  mean_col <- cols[1]; sd_col <- cols[2]
+# 3.3: how to pull means and SRs for each column         
+  valR_control <- if (!is.na(R_control[[mean_col]])) {
+    if (mean_col == "count") sprintf("%d", R_control[[mean_col]]) else sprintf("%.2f (%.2f)", R_control[[mean_col]], R_control[[sd_col]])
+  } else NA_character_
+  star <- if (label %in% names(stars_R)) stars_R[[label]] else ""
+  valR_treat <- if (!is.na(R_treat[[mean_col]])) {
+    if (mean_col == "count") sprintf("%d", R_treat[[mean_col]])
+    else sprintf("%.2f (%.2f)%s", R_treat[[mean_col]], R_treat[[sd_col]], star)
+  } else NA_character_
+# 3.4: bind into table         
+  tibble::tibble(Variable = label, Group_R_control = valR_control, Group_R_treat = valR_treat)
+}) %>% dplyr::bind_rows()
+# 3.5: make the labels for table and fill in      
+nR_control <- R_control %>% pull(count) %>% unique()
+nR_treat <- R_treat %>% pull(count) %>% unique()
+colnames(rep_rows)[2:3] <- c(
+  paste0("Control x Republican"),
+  paste0("Treatment x Republican"))
+```
+``` {r, echo = FALSE}
+knitr::kable(rep_rows, format = "pipe")
+```
+
+*I also created a combined version of this table with four columns by condition assignment and (non-randomized) partisan ID, which was not specified in the pre-analysis plan, but essentially places these two tables next to each other. Therefore, this is not a significant deviation.*
+``` {r}
+# 5.1: make groups
+groups <- list(
+  list(num = 1, col = "Control x Republican"),
+  list(num = 3, col = "Treatment x Republican"),
+  list(num = 2, col = "Control x Democrat"),
+  list(num = 4, col = "Treatment x Democrat"))
+# 5.2: form column structure   
+combined_rows <- lapply(names(items), function(label) {
+  cols     <- items[[label]]
+  mean_col <- cols[1]; sd_col <- cols[2]
+# 5.3: how to pull means and SDs for each column  
+  vals <- lapply(groups, function(g) {
+    grp <- descriptive_stats %>% filter(exp_group_numeric == g$num)
+    if (!is.na(grp[[mean_col]])) {
+      if (mean_col == "count") sprintf("%d", grp[[mean_col]]) 
+      else sprintf("%.2f (%.2f)", grp[[mean_col]], grp[[sd_col]])
+    } else NA_character_
+  })
+# 5.4: bind into table
+  row <- tibble::tibble(Variable = label)
+  for (i in seq_along(groups)) row[[groups[[i]]$col]] <- vals[[i]]
+  row
+}) %>% dplyr::bind_rows()
+```
+``` {r, echo = FALSE}
+knitr::kable(combined_rows, format = "pipe")
+```
+
+*I deviate from the pre-analysis plan by creating an additional table that reports the mean and standard errors for each condition. This was selected for inclusion in the final manuscript to be consistent with later analyses, given that our conditional average treatment effect (CATE) estimates report robust standard errors.*
+
+## Republicans
+``` {r}
+# 3.1: make groups
+gR_control <- 1
+gR_treat   <- 3
+R_control <- descriptive_stats %>% filter(exp_group_numeric == gR_control)
+R_treat <- descriptive_stats %>% filter(exp_group_numeric == gR_treat)
+# 3.2: form column structure
+rep_rows_se <- lapply(names(items), function(label) {
+cols    <- items[[label]]
+mean_col <- cols[1]; se_col <- cols[2]
+# 3.3: how to pull means and SRs for each column
+valR_control_se <- if (!is.na(R_control[[mean_col]])) {
+if (mean_col == "count") sprintf("%d", R_control[[mean_col]]) else sprintf("%.2f (%.2f)", R_control[[mean_col]], R_control[[se_col]])
+} else NA_character_
+star <- if (label %in% names(stars_R)) stars_R[[label]] else ""
+valR_treat_se <- if (!is.na(R_treat[[mean_col]])) {
+if (mean_col == "count") sprintf("%d", R_treat[[mean_col]])
+else sprintf("%.2f (%.2f)%s", R_treat[[mean_col]], R_treat[[se_col]], star)
+} else NA_character_
+# 3.4: bind into table
+tibble::tibble(Variable = label, Group_R_control = valR_control_se, Group_R_treat = valR_treat_se)
+}) %>% dplyr::bind_rows()
+# 3.5: make the labels for table and fill in
+nR_control_se <- R_control %>% pull(count) %>% unique()
+nR_treat_se <- R_treat %>% pull(count) %>% unique()
+colnames(rep_rows_se)[2:3] <- c(
+paste0("Control x Republican"),
+paste0("Treatment x Republican"))
+```
+``` {r, echo = FALSE}
+knitr::kable(rep_rows_se, format = "pipe")
+```
+
+## Democrats 
+``` {r}
+# 4.1: make groups
+gD_control <- 2
+gD_treat <- 4
+D_control <- descriptive_stats %>% filter(exp_group_numeric == gD_control)
+D_treat <- descriptive_stats %>% filter(exp_group_numeric == gD_treat)
+# 4.2: form column structure
+dem_rows_se <- lapply(names(items), function(label) {
+        cols    <- items[[label]]
+        mean_col <- cols[1]; se_col <- cols[2]
+# 4.3: how to pull means and SDs for each column
+        valD_control_se <- if (!is.na(D_control[[mean_col]])) {
+        if (mean_col == "count") sprintf("%d", D_control[[mean_col]]) else sprintf("%.2f (%.2f)", D_control[[mean_col]], D_control[[se_col]])
+        } else NA_character_
+        star <- if (label %in% names(stars_D)) stars_D[[label]] else ""
+        valD_treat_se <- if (!is.na(D_treat[[mean_col]])) {
+        if (mean_col == "count") sprintf("%d", D_treat[[mean_col]])
+        else sprintf("%.2f (%.2f)%s", D_treat[[mean_col]], D_treat[[se_col]], star)
+        } else NA_character_
+# 4.4: bind into table
+tibble::tibble(Variable = label, Group_D_control = valD_control_se, Group_D_treat = valD_treat_se)
+}) %>% dplyr::bind_rows()
+# 4.5: make the labels for table and fill in
+nD_control_se <- D_control %>% pull(count) %>% unique()
+nD_treat_se <- D_treat %>% pull(count) %>% unique()
+colnames(dem_rows_se)[2:3] <- c(
+paste0("Control x Democrat"),
+paste0("Treatment x Democrat"))
+```
+``` {r, echo = FALSE}
+knitr::kable(dem_rows_se, format = "pipe")
+```
+
+## Combined 
+``` {r}
+groups_se <- list(
+list(num = 1, col = "Control x Republican"),
+list(num = 3, col = "Treatment x Republican"),
+list(num = 2, col = "Control x Democrat"),
+list(num = 4, col = "Treatment x Democrat"))
+# 5.2: form column structure
+combined_rows_se <- lapply(names(items), function(label) {
+cols     <- items[[label]]
+mean_col <- cols[1]; se_col <- cols[2]
+# 5.3: how to pull means and SDs for each column
+vals_se <- lapply(groups, function(g) {
+grp <- descriptive_stats %>% filter(exp_group_numeric == g$num)
+if (!is.na(grp[[mean_col]])) {
+if (mean_col == "count") sprintf("%d", grp[[mean_col]])
+else sprintf("%.2f (%.2f)", grp[[mean_col]], grp[[se_col]])
+} else NA_character_
+})
+# 5.4: bind into table
+row <- tibble::tibble(Variable = label)
+for (i in seq_along(groups)) row[[groups[[i]]$col]] <- vals_se[[i]]
+row
+}) %>% dplyr::bind_rows()
+```
+``` {r, echo = FALSE}
+knitr::kable(combined_rows_se, format = "pipe")
+```
+
+# Correlations 
+Next, I will create a correlation matrix to test the relationship between individual SPV, meta-perceptions of Republicans’ SPV, and the difference between pre- and post-treatment affective ratings based on whether the party is one’s own party (ingroup) or the opposing party (outgroup). 
+``` {r}
+# A: SPV v. in-party meta-SPV
+cor.test(data_clean$SPV_individual, data_clean$SPV_meta_R)
+# B: SPV v. ft_diff_out
+cor.test(data_clean$SPV_individual, data_clean$ft_diff_out)
+# C: SPV v. ft_diff_in
+cor.test(data_clean$SPV_individual, data_clean$ft_diff_in)
+# D: in-party meta-SPV v. ft_diff_in
+cor.test(data_clean$SPV_meta_R, data_clean$ft_diff_in)
+# E: out-party meta-SPV v. ft_diff_out
+cor.test(data_clean$SPV_meta_R, data_clean$ft_diff_out)
+```
+
+I will also run two correlations designed to test whether the four SPV questions that are more concretely scenario-based correlate to the two SPV questions that are broader and vaguer in their depicted scenarios, allowing us to determine whether there may be any confounding effects of question wording.
+``` {r}
+cor.test(data_clean$SPV_indiv_scenario, data_clean$SPV_indiv_broad)
+cor.test(data_clean$SPV_meta_scenario, data_clean$SPV_meta_broad)
+```
+
+*I deviate from the analysis plan by constructing correlation matrices for all pre-treatment and post-treatment variables separately. All correlations reported above are still included.*
+``` {r}
+pretreat_matrix <- data_clean %>%
+  dplyr::select (condition_dummy, 
+                 party_numeric, ideology_selfreport, maga, PID_strength, social_closeness, ft_rep_pre, ft_dem_pre)
+pretreat_results <- round(cor(pretreat_matrix, use = "pairwise.complete.obs"), 2)
+pretreat_stars <- cor_with_stars(pretreat_matrix)
+```
+``` {r, echo = FALSE}
+knitr::kable(pretreat_stars, format = "pipe")
+```
+``` {r}
+postreat_matrix <- data_clean %>%
+  dplyr::select (condition_dummy,
+                 ft_rep_post, ft_dem_post, ft_diff_in, ft_diff_out,
+                 moral_disengagement_outgroup, SPV_individual, SPV_meta_R, SPV_indiv_scenario, SPV_indiv_broad, SPV_meta_scenario, SPV_meta_broad)
+postreat_results <- round(cor(postreat_matrix, use = "pairwise.complete.obs"), 2)
+postreat_stars <- cor_with_stars(postreat_matrix)
+```
+``` {r, echo = FALSE}
+knitr::kable(postreat_stars, format = "pipe")
+```
+
+Furthermore, I will also run a correlation analysis between each of the eight emotions named in the PANAS-M—Anger, Shame, Guilt, Disgust, Fear, Anxiety, Sadness, and Happiness—and our pre-treatment measures of partisan self-concept, social closeness, affective ratings toward the Republican Party, and affective ratings toward the Democratic Party. I selected only pre-treatment measures since participants will only complete the PANAS-M scale following random assignment to the treatment or control group. 
+
+*Here, I diverge from the pre-analysis plan to prevent any effects of post-treatment conditioning. That is, I only report correlations between the treatment and post-treatment variables such that the pre-treatment variables are not interpreted as corollaries for the significance of a treatment effect on any post-treatment variables.*
+``` {r}
+emotion_matrix <- data_clean %>%
+  dplyr::select (condition_dummy,
+                 angry_dummy,
+                 shame_dummy,
+                 guilt_dummy,
+                 disgust_dummy,
+                 fear_dummy,
+                 anxiety_dummy,
+                 sadness_dummy,
+                 happiness_dummy)
+emotion_results <- round(cor(emotion_matrix, use = "pairwise.complete.obs"), 2)
+emotion_stars <- cor_with_stars(emotion_matrix)
+```
+``` {r, echo = FALSE}
+knitr::kable(emotion_stars, format = "pipe")
+```
+
+
+
+# Conditional Average Treatment Effect (CATE) 
+Broadly speaking, all analyses will test the effect of shared partisan identity across the pre-identified set of hypothesis-specific outcome variables through a set of Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors applied. This method will determine whether the contrast between Democratic and Republican participants varies in overall magnitude between the treatment and control groups.
+``` {r}
+library(readxl)
+library(tidyverse)
+library(psych)
+library(interactions)
+library(broom)
+library(emmeans)
+library(stargazer)
+library(effsize)
+library(modelsummary)
+library(lsr)
+library(rempsyc)
+library(estimatr)
+library(ggsignif)
+```
+
+To test Hypotheses 1a through 3b, I will conduct an Ordinary Least Squares (OLS) linear regression model with heteroskedasticity-robust standard errors applied. For Hypotheses 1a and 1b, I will regress the composite variable for meta-perceptions of the average Republican’s support for political violence onto a dichotomous variable denoting condition assignment, with the numeric version of the ANES 7-point party identification scale and the interaction between condition assignment and the numeric version of the ANES 7-point party identification scale as the two covariate terms.
+``` {r}
+H1<- lm_robust(SPV_meta_R ~ condition_dummy * party_numeric,
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H1), digits = 3, format = "pipe")
+```
+
+To test Hypotheses 2a and 2b, I will regress the composite variable for moral disengagement toward the outgroup party onto a dichotomous variable denoting condition assignment, with the numeric version of the ANES 7-point party identification scale and the interaction between condition assignment and the numeric version of the ANES 7-point party identification scale as the two covariate terms.
+``` {r}
+H2<- lm_robust(moral_disengagement_outgroup ~ condition_dummy * party_numeric,
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H2), digits = 3, format = "pipe")
+```
+
+To test Hypotheses 3a and 3b, I will regress the composite variable for individual support for political violence toward the outgroup party onto a dichotomous variable denoting condition assignment, with the numeric version of the ANES 7-point party identification scale and the interaction between condition assignment and the numeric version of the ANES 7-point party identification scale as the two covariate terms.
+``` {r}
+H3<- lm_robust(SPV_individual ~ condition_dummy * party_numeric,
+                     data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H3), digits = 3, format = "pipe")
+```
+
+Secondary hypothesis tests will examine the significance of the treatment effect on post-treatment affective ratings by an Ordinary Least Squares (OLS) linear regression model with heteroskedasticity-robust standard errors applied. I will test whether there is an overall decrease in affective ratings toward the Republican Party among participants presented with the violence-endorsing message (H4a) by regressing post-treatment ratings toward the Republican Party onto a dichotomous variable representing the two experimental conditions, interacted with the numeric version of the ANES 7-point party identification scale.
+``` {r}
+H4a<- lm_robust(ft_rep_post ~ condition_dummy * party_numeric,
+                        data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4a), digits = 3, format = "pipe")
+```
+
+For Hypothesis 4b, I add the interaction between the dichotomous treatment variable and pre-treatment ratings toward the Republican Party as an additional covariate of interest.
+``` {r}
+H4b <- lm_robust(ft_rep_post ~ condition_dummy * party_numeric + condition_dummy * ft_rep_pre,
+                                 data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4b), digits = 3, format = "pipe")
+```
+
+For Hypotheses 5a through 5c, I will conduct a baseline OLS linear regression model with heteroskedasticity-robust standard errors, regressing post-treatment affective ratings toward the Republican Party onto a three-way interaction between the dichotomous treatment variable, the numeric version of the ANES 7-point party identification scale, and a numeric variable representing the three groups of partisan self-concept.
+``` {r}
+H5 <- lm_robust(ft_rep_post ~ condition_dummy * party_numeric * PID_bin,
+                            data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H5), digits = 3, format = "pipe")
+```
+
+For Hypotheses 6a through 6c, I will regress post-treatment affective ratings toward the Democratic Party onto the same variables identified for testing Hypotheses 5a through 5c.
+``` {r}
+H6 <- lm_robust(ft_dem_post ~ condition_dummy * party_numeric * PID_bin,
+                            data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H6), digits = 3, format = "pipe")
+```
+
+## Deviations from PAP
+
+*I convert party_numeric into a categorical variable to determine whether the above model-based predictions correspond to the raw data.*
+
+``` {r, include=FALSE}
+# ==================================================
+# Panel A: raw mean of the OUTCOME VAR (y) by party_numeric (x)
+#          colored by exp_group_category
+# Panel B: raw diff-in-means of OUTCOME VAR (y)
+#          by party_numeric (x), with lm_robust regression overlay
+# x-axis is always party_numeric in both panels
+# ==================================================
+
+library(tidyverse)
+library(patchwork)
+library(estimatr)
+library(emmeans)
+library(stargazer)
+
+# ── shared aesthetics (from 4-9-26.R) ───────────────────────────
+pid_breaks <- c(1, 2, 3, 5, 6, 7)
+pid_labels <- c("Strong D", "Weak D", "Lean D", "Lean R", "Weak R", "Strong R")
+
+pid_colors <- c(
+  "1" = "midnightblue", "2" = "dodgerblue", "3" = "steelblue",
+  "5" = "salmon",       "6" = "firebrick",  "7" = "darkred"
+)
+
+exp_group_colors <- c(
+  "Control R"   = "darkred",
+  "Treatment R" = "hotpink",
+  "Control D"   = "midnightblue",
+  "Treatment D" = "dodgerblue"
+)
+
+base_theme <- theme_minimal(base_size = 11) +
+  theme(axis.text.x      = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank())
+```
+
+### Hypothesis 1
+``` {r}
+H1_factor <- lm_robust(SPV_meta_R ~ condition_dummy * factor(party_numeric),
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H1_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H1_factor <- emmeans(H1_factor, ~ condition_dummy | party_numeric,
+                         vcov. = vcov(H1_factor))
+contr_H1_factor <- contrast(emm_H1_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = "party_numeric")
+contr_H1_factor_df <- as.data.frame(confint(contr_H1_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H1_factor)), digits = 3, format = "pipe")
+```
+
+### Hypothesis 2
+``` {r}
+H2_factor <- lm_robust(moral_disengagement_outgroup ~ condition_dummy * factor(party_numeric),
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H2_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H2_factor <- emmeans(H2_factor, ~ condition_dummy | party_numeric,
+                         vcov. = vcov(H2_factor))
+contr_H2_factor <- contrast(emm_H2_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = "party_numeric")
+contr_H2_factor_df <- as.data.frame(confint(contr_H2_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H2_factor)), digits = 3, format = "pipe")
+```
+
+### Hypothesis 3
+``` {r}
+H3_factor <- lm_robust(SPV_individual ~ condition_dummy * factor(party_numeric),
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H3_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H3_factor <- emmeans(H3_factor, ~ condition_dummy | party_numeric,
+                         vcov. = vcov(H3_factor))
+contr_H3_factor <- contrast(emm_H3_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = "party_numeric")
+contr_H3_factor_df <- as.data.frame(confint(contr_H3_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H3_factor)), digits = 3, format = "pipe")
+```
+
+### Hypothesis 4a
+``` {r}
+H4a_factor <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric),
+                        data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4a_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H4a_factor <- emmeans(H4a_factor, ~ condition_dummy | party_numeric,
+                         vcov. = vcov(H4a_factor))
+contr_H4a_factor <- contrast(emm_H4a_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = "party_numeric")
+contr_H4a_factor_df <- as.data.frame(confint(contr_H4a_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H4a_factor)), digits = 3, format = "pipe")
+```
+
+### Hypothesis 4b
+``` {r}
+H4b_factor <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric)
+                                      + condition_dummy * ft_rep_pre,
+                                      data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4b_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H4b_factor <- emmeans(H4b_factor, ~ condition_dummy | party_numeric,
+                         vcov. = vcov(H4b_factor))
+contr_H4b_factor <- contrast(emm_H4b_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = "party_numeric")
+contr_H4b_factor_df <- as.data.frame(confint(contr_H4b_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H4b_factor)), digits = 3, format = "pipe")
+```
+
+*For the following hypothesis groups, I collapsed Weak and Medium Partisan Self-Concept into the same group given the low N.*
+``` {r}
+data_clean <- data_clean |>
+  mutate(
+    PID_bin_collapsed = case_when(
+      PID_bin %in% c(0, 1) ~ "Weak-Medium",
+      PID_bin == 2          ~ "Strong",
+      TRUE                  ~ NA_character_
+    ),
+    PID_bin_collapsed = factor(PID_bin_collapsed,
+                               levels = c("Weak-Medium", "Strong"))
+  )
+```
+
+### Hypothesis 5
+``` {r}
+H5_factor <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric) * PID_bin_collapsed,
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H5_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H5_factor <- emmeans(H5_factor, ~ condition_dummy | party_numeric + PID_bin_collapsed,
+                         vcov. = vcov(H5_factor))
+contr_H5_factor <- contrast(emm_H5_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = c("party_numeric", "PID_bin_collapsed"))
+contr_H5_factor_df <- as.data.frame(confint(contr_H5_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H5_factor)), digits = 3, format = "pipe")
+```
+
+### Hypothesis 6
+``` {r}
+H6_factor <- lm_robust(ft_dem_post ~ condition_dummy * factor(party_numeric) * PID_bin_collapsed,
+                       data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H6_factor), digits = 3, format = "pipe")
+```
+``` {r}
+emm_H6_factor <- emmeans(H6_factor, ~ condition_dummy | party_numeric + PID_bin_collapsed,
+                         vcov. = vcov(H6_factor))
+contr_H6_factor <- contrast(emm_H6_factor,
+                            method = list("Treatment - Control" = c(-1, 1)),
+                            by = c("party_numeric", "PID_bin_collapsed"))
+contr_H6_factor_df <- as.data.frame(confint(contr_H6_factor))
+```
+``` {r, echo = FALSE}
+knitr::kable(as.data.frame(summary(contr_H6_factor)), digits = 3, format = "pipe")
+```
+
+# Planned Contrasts 
+Across all hypotheses, except Hypothesis 4b (which relies on a multivariate Ordinary Least Squares regression model), I will also employ planned contrasts using estimated marginal means to measure the difference in means between the treatment and control groups. This method will determine the model-based predictions of the average treatment effect for our identified groups of interest, measured as t-ratios and adjusted for covariates and unbalanced sample sizes. For our primary hypotheses (1a through 3b), along with Hypothesis 4a, our planned contrasts are fourfold: Republicans in the treatment condition versus Democrats in the treatment condition, Republicans in the control condition versus Democrats in the control condition, Republicans in the control condition versus Republicans in the treatment condition, and Democrats in the control condition versus Democrats in the treatment condition.
+
+*For all hypotheses, I define my groups based on the 7-point party identification scale detailed above, of which the six groups referenced are “Strong D,” “Weak D”, “Lean D”, “Lean R”, “Weak R,” and “Strong R”. As such, I deviate from the pre-analysis plan outlined for Hypotheses 1a through 4b, in which I defined my groups of interest as the control and treatment groups for Republicans and Democrats separately. However, this method allows me to ascertain deeper group-level differences in treatment effects that would otherwise not be observable if comparing treated Democrats to treated Republicans more broadly, for example.*
+
+## Hypothesis 1
+``` {r}
+emm_H1<- emmeans(H1, ~ condition_dummy | party_numeric,
+                 at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                 vcov. = vcov(H1))
+contr_H1<- contrast(emm_H1,
+                    method = list("Treatment - Control" = c(-1, 1)),
+                    by = "party_numeric")
+contr_H1_df <- as.data.frame(confint(contr_H1))
+contr_H1_table <- summary(contr_H1) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_H1_table, format = "pipe")
+```
+``` {r}
+pA_H1 <- data_clean |>
+  filter(!is.na(exp_group_category)) |>
+  group_by(party_numeric, exp_group_category) |>
+  summarise(
+    mean_y = mean(SPV_meta_R, na.rm = TRUE),
+    se_y   = sd(SPV_meta_R, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+  geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                    ymax = mean_y + 1.96 * se_y),
+                width = 0.15, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_x_discrete(labels = pid_labels) +
+  scale_color_manual(
+    values = c(
+      "Control R"   = "darkred",
+      "Treatment R" = "hotpink",
+      "Control D"   = "midnightblue",
+      "Treatment D" = "dodgerblue"
+    ),
+    name = "Condition"
+  ) +
+  labs(title = "A", x = NULL,
+       y = "Meta-Perceptions of Republican SPV\n(raw mean)") +
+  base_theme +
+  theme(legend.position = "bottom")
+```
+``` {r, echo = FALSE}
+pA_H1
+```
+``` {r}
+pB_H1 <- ggplot(contr_H1_factor_df, aes(x = party_numeric, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(method = "lm_robust", se = TRUE,
+              color = "grey20", fill = "grey60",
+              alpha = 0.2, linewidth = 0.9) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                    color = factor(party_numeric)),
+                width = 0.15, linewidth = 0.6) +
+  geom_point(aes(color = factor(party_numeric)), size = 3) +
+  scale_color_manual(values = pid_colors, guide = "none") +
+  scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+  labs(title = "B", x = "Party ID",
+       y = "Difference in Means") +
+  base_theme
+```
+``` {r, echo = FALSE}
+pB_H1
+```
+
+## Hypothesis 2
+``` {r}
+emm_H2<- emmeans(H2, ~ condition_dummy | party_numeric,
+                 at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                 vcov. = vcov(H2))
+contr_H2<- contrast(emm_H2,
+                    method = list("Treatment - Control" = c(-1, 1)),
+                    by = "party_numeric")
+contr_H2_df <- as.data.frame(confint(contr_H2))
+contr_H2_table <- summary(contr_H2) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_H2_table, format = "pipe")
+```
+``` {r}
+pA_H2 <- data_clean |>
+  filter(!is.na(exp_group_category)) |>
+  group_by(party_numeric, exp_group_category) |>
+  summarise(
+    mean_y = mean(moral_disengagement_outgroup, na.rm = TRUE),
+    se_y   = sd(moral_disengagement_outgroup, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+  geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                    ymax = mean_y + 1.96 * se_y),
+                width = 0.15, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_x_discrete(labels = pid_labels) +
+  scale_color_manual(
+    values = c(
+      "Control R"   = "darkred",
+      "Treatment R" = "hotpink",
+      "Control D"   = "midnightblue",
+      "Treatment D" = "dodgerblue"
+    ),
+    name = "Condition"
+  ) +
+  labs(title = "A", x = NULL,
+       y = "Moral Disengagement (Out-Party)\n(raw mean)") +
+  base_theme +
+  theme(legend.position = "bottom")
+```
+``` {r, echo = FALSE}
+pA_H2
+```
+``` {r}
+pB_H2 <- ggplot(contr_H2_factor_df, aes(x = party_numeric, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(method = "lm_robust", se = TRUE,
+              color = "grey20", fill = "grey60",
+              alpha = 0.2, linewidth = 0.9) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                    color = factor(party_numeric)),
+                width = 0.15, linewidth = 0.6) +
+  geom_point(aes(color = factor(party_numeric)), size = 3) +
+  scale_color_manual(values = pid_colors, guide = "none") +
+  scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+  labs(title = "B", x = "Party ID",
+       y = "Difference in Means") +
+  base_theme
+```
+``` {r, echo = FALSE}
+pB_H2
+```
+
+## Hypothesis 3
+``` {r}
+emm_H3<- emmeans(H3, ~ condition_dummy | party_numeric,
+                 at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                 vcov. = vcov(H3))
+contr_H3<- contrast(emm_H3,
+                    method = list("Treatment - Control" = c(-1, 1)),
+                    by = "party_numeric")
+contr_H3_df <- as.data.frame(confint(contr_H3))
+contr_H3_table <- summary(contr_H3) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_H3_table, format = "pipe")
+```
+``` {r}
+pA_H3 <- data_clean |>
+  filter(!is.na(exp_group_category)) |>
+  group_by(party_numeric, exp_group_category) |>
+  summarise(
+    mean_y = mean(SPV_individual, na.rm = TRUE),
+    se_y   = sd(SPV_individual, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+  geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                    ymax = mean_y + 1.96 * se_y),
+                width = 0.15, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_x_discrete(labels = pid_labels) +
+  scale_color_manual(
+    values = c(
+      "Control R"   = "darkred",
+      "Treatment R" = "hotpink",
+      "Control D"   = "midnightblue",
+      "Treatment D" = "dodgerblue"
+    ),
+    name = "Condition"
+  ) +
+  labs(title = "A", x = NULL,
+       y = "Individual SPV\n(raw mean)") +
+  base_theme +
+  theme(legend.position = "bottom")
+```
+``` {r, echo = FALSE}
+pA_H3
+```
+``` {r}
+pB_H3 <- ggplot(contr_H3_factor_df, aes(x = party_numeric, y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(method = "lm_robust", se = TRUE,
+              color = "grey20", fill = "grey60",
+              alpha = 0.2, linewidth = 0.9) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                    color = factor(party_numeric)),
+                width = 0.15, linewidth = 0.6) +
+  geom_point(aes(color = factor(party_numeric)), size = 3) +
+  scale_color_manual(values = pid_colors, guide = "none") +
+  scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+  labs(title = "B", x = "Party ID",
+       y = "Difference in Means") +
+  base_theme
+```
+``` {r, echo = FALSE}
+pB_H3
+```
+
+## Hypothesis 4a
+``` {r}
+emm_H4a<- emmeans(H4a, ~ condition_dummy | party_numeric,
+                 at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                 vcov. = vcov(H4a))
+contr_H4a<- contrast(emm_H4a,
+                    method = list("Treatment - Control" = c(-1, 1)),
+                    by = "party_numeric")
+contr_H4a_df <- as.data.frame(confint(contr_H4a))
+contr_H4a_table <- summary(contr_H4a) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_H4a_table, format = "pipe")
+```
+``` {r}
+pA_H4a <- data_clean |>
+  filter(!is.na(exp_group_category)) |>
+  group_by(party_numeric, exp_group_category) |>
+  summarise(
+    mean_y = mean(ft_rep_post, na.rm = TRUE),
+    se_y   = sd(ft_rep_post, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+  geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                    ymax = mean_y + 1.96 * se_y),
+                width = 0.15, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_x_discrete(labels = pid_labels) +
+  scale_color_manual(
+    values = c(
+      "Control R"   = "darkred",
+      "Treatment R" = "hotpink",
+      "Control D"   = "midnightblue",
+      "Treatment D" = "dodgerblue"
+    ),
+    name = "Condition"
+  ) +
+  labs(title = "A", x = NULL,
+       y = "Affective Ratings:\nRepublican Party\n(raw mean)") +
+  base_theme +
+  theme(legend.position = "bottom")
+```
+``` {r, echo = FALSE}
+pA_H4a
+```
+``` {r}
+pB_H4a <- ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(data = contr_H4a_factor_df,
+              aes(x = party_numeric, y = estimate),
+              method = "lm_robust", se = TRUE,
+              color = "grey20", fill = "grey60",
+              alpha = 0.2, linewidth = 0.9) +
+  geom_errorbar(data = contr_H4a_factor_df,
+                aes(x = party_numeric, ymin = lower.CL, ymax = upper.CL,
+                    color = factor(party_numeric)),
+                width = 0.15, linewidth = 0.6) +
+  geom_point(data = contr_H4a_factor_df,
+             aes(x = party_numeric, y = estimate,
+                 color = factor(party_numeric)),
+             size = 3) +
+  scale_color_manual(values = pid_colors, guide = "none") +
+  scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+  labs(title = "B", x = "Party ID",
+       y = "Difference in Means") +
+  base_theme
+```
+``` {r, echo = FALSE}
+pB_H4a
+```
+
+## Hypothesis 4b
+``` {r}
+emm_H4b<- emmeans(H4b, ~ condition_dummy | party_numeric,
+                 at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                 vcov. = vcov(H4b))
+contr_H4b<- contrast(emm_H4b,
+                    method = list("Treatment - Control" = c(-1, 1)),
+                    by = "party_numeric")
+contr_H4b_df <- as.data.frame(confint(contr_H4b))
+contr_H4b_table <- summary(contr_H4b) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_H4b_table, format = "pipe")
+```
+``` {r}
+pA_H4b <- data_clean |>
+  filter(!is.na(exp_group_category)) |>
+  group_by(party_numeric, exp_group_category) |>
+  summarise(
+    mean_y = mean(ft_rep_pre, na.rm = TRUE),
+    se_y   = sd(ft_rep_pre, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+  geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                    ymax = mean_y + 1.96 * se_y),
+                width = 0.15, linewidth = 0.6,
+                position = position_dodge(width = 0.4)) +
+  geom_point(size = 3, position = position_dodge(width = 0.4)) +
+  scale_x_discrete(labels = pid_labels) +
+  scale_color_manual(
+    values = c(
+      "Control R"   = "darkred",
+      "Treatment R" = "hotpink",
+      "Control D"   = "midnightblue",
+      "Treatment D" = "dodgerblue"
+    ),
+    name = "Condition"
+  ) +
+  labs(title = "A", x = NULL,
+       y = "Affective Ratings:\nRepublican Party\n(pre-treatment mean)") +
+  base_theme +
+  theme(legend.position = "bottom")
+```
+``` {r, echo = FALSE}
+pA_H4b
+```
+``` {r}
+pB_H4b <- ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_smooth(data = contr_H4b_factor_df,
+              aes(x = party_numeric, y = estimate),
+              method = "lm_robust", se = TRUE,
+              color = "grey20", fill = "grey60",
+              alpha = 0.2, linewidth = 0.9) +
+  geom_errorbar(data = contr_H4b_factor_df,
+                aes(x = party_numeric, ymin = lower.CL, ymax = upper.CL,
+                    color = factor(party_numeric)),
+                width = 0.15, linewidth = 0.6) +
+  geom_point(data = contr_H4b_factor_df,
+             aes(x = party_numeric, y = estimate,
+                 color = factor(party_numeric)),
+             size = 3) +
+  scale_color_manual(values = pid_colors, guide = "none") +
+  scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+  labs(title = "B", x = "Party ID",
+       y = "Difference in Means") +
+  base_theme
+```
+``` {r, echo = FALSE}
+pB_H4b
+```
+
+## Hypothesis 5
+``` {r, include=FALSE}
+make_H5_H6_panels <- function(outcome_var, pid_bin_label,
+                              factor_df, y_label_A, fig_title) {
+  df <- factor_df |>
+    filter(PID_bin_collapsed == pid_bin_label)
+
+  pA <- data_clean |>
+    filter(PID_bin_collapsed == pid_bin_label) |>
+    filter(!is.na(exp_group_category)) |>
+    group_by(party_numeric, exp_group_category) |>
+    summarise(
+      mean_y = mean(.data[[outcome_var]], na.rm = TRUE),
+      se_y   = sd(.data[[outcome_var]], na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    ) |>
+    ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+    geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                      ymax = mean_y + 1.96 * se_y),
+                  width = 0.15, linewidth = 0.6,
+                  position = position_dodge(width = 0.4)) +
+    geom_point(size = 3, position = position_dodge(width = 0.4)) +
+    scale_x_discrete(labels = pid_labels) +
+    scale_color_manual(
+      values = c(
+        "Control R"   = "darkred",
+        "Treatment R" = "hotpink",
+        "Control D"   = "midnightblue",
+        "Treatment D" = "dodgerblue"
+      ),
+      name = "Condition"
+    ) +
+    labs(title = "A", x = NULL, y = y_label_A) +
+    base_theme +
+    theme(legend.position = "bottom")
+
+  pB <- ggplot(df, aes(x = party_numeric, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_smooth(method = "lm_robust", se = TRUE,
+                color = "grey20", fill = "grey60",
+                alpha = 0.2, linewidth = 0.9) +
+    geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                      color = factor(party_numeric)),
+                  width = 0.15, linewidth = 0.6) +
+    geom_point(aes(color = factor(party_numeric)), size = 3) +
+    scale_color_manual(values = pid_colors, guide = "none") +
+    scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+    labs(title = "B", x = "Party ID",
+         y = "Difference in Means") +
+    base_theme
+  
+  pA / pB + plot_annotation(title = fig_title)
+}
+```
+
+For Hypotheses 5a through 6c, I establish three sets of planned contrasts based on partisan self-concept: weaker-identifying Republicans (H5a and H6a), stronger-identifying Republicans (H5b and H6b), and stronger-identifying Democrats (H5c and H6c). I created these bins based on the 7-point party identification scale detailed above. Given that the six groups referenced are “Strong D,” “Weak D”, “Lean D”, “Lean R”, “Weak R,” and “Strong R”, I plan to focus on the results for “Lean R”, “Strong D,” and “Strong R” as our primary groups of interest for each of the respective hypotheses.
+
+``` {r}
+emm_H5 <- emmeans(H5, ~ condition_dummy | party_numeric + PID_bin,
+                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7), PID_bin = c(0, 1, 2)),
+                       vcov. = vcov(H5))
+contr_H5 <- contrast(emm_H5,
+            method = list("Treatment - Control" = c(-1, 1)),
+            by = c("party_numeric", "PID_bin"))
+contr_table_H5 <- summary(contr_H5) |>
+  as.data.frame() |>
+          dplyr::select(contrast, party_numeric, PID_bin, estimate, SE, df, t.ratio, p.value) |>
+          mutate(
+            party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                   labels = c("Strong D", "Weak D", "Lean D",
+                                              "Lean R", "Weak R", "Strong R")),
+            PID_bin = factor(PID_bin, levels = 0:2,
+                             labels = c("Weak", "Medium", "Strong")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_H5, format = "pipe")
+```
+
+### Weak/Med Partisan Self-Concept
+``` {r, fig.width = 7, fig.height = 9}
+p_H5_weakmed <- make_H5_H6_panels(
+  "ft_rep_post", "Weak-Medium", contr_H5_factor_df,
+  "Affective Ratings:\nRepublican Party\n(raw mean)",
+  "Figure 4.5a: Republican Party Ratings — Weak-Medium PID Strength"
+)
+p_H5_weakmed
+```
+
+### Strong Partisan Self-Concept
+``` {r, fig.width = 7, fig.height = 9}
+p_H5_strong <- make_H5_H6_panels(
+  "ft_rep_post", "Strong", contr_H5_factor_df,
+  "Affective Ratings:\nRepublican Party\n(raw mean)",
+  "Figure 4.5b: Republican Party Ratings — Strong PID Strength"
+)
+p_H5_strong
+```
+
+## Hypothesis 6
+``` {r}
+emm_H6 <- emmeans(H6, ~ condition_dummy | party_numeric + PID_bin,
+                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7), PID_bin = c(0, 1, 2)),
+                       vcov. = vcov(H6))
+contr_H6 <- contrast(emm_H6,
+            method = list("Treatment - Control" = c(-1, 1)),
+            by = c("party_numeric", "PID_bin"))
+contr_table_H6 <- summary(contr_H6) |>
+  as.data.frame() |>
+          dplyr::select(contrast, party_numeric, PID_bin, estimate, SE, df, t.ratio, p.value) |>
+          mutate(
+            party_numeric = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                                   labels = c("Strong D", "Weak D", "Lean D",
+                                              "Lean R", "Weak R", "Strong R")),
+            PID_bin = factor(PID_bin, levels = 0:2,
+                             labels = c("Weak", "Medium", "Strong")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_H6, format = "pipe")
+```
+
+### Weak/Med Partisan Self-Concept
+``` {r, fig.width = 7, fig.height = 9}
+p_H6_weakmed <- make_H5_H6_panels(
+  "ft_dem_post", "Weak-Medium", contr_H6_factor_df,
+  "Affective Ratings:\nDemocratic Party\n(raw mean)",
+  "Figure 4.6a: Democratic Party Ratings — Weak-Medium PID Strength"
+)
+p_H6_weakmed
+```
+
+### Strong Partisan Self-Concept
+``` {r, fig.width = 7, fig.height = 9}
+p_H6_strong <- make_H5_H6_panels(
+  "ft_dem_post", "Strong", contr_H6_factor_df,
+  "Affective Ratings:\nDemocratic Party\n(raw mean)",
+  "Figure 4.6b: Democratic Party Ratings — Strong PID Strength"
+)
+p_H6_strong
+```
+
+# Exploratory Analyses
+
+## Post-Treatment FT as Outcome Variable
+
+In addition to the pre-planned analyses, I will perform exploratory analyses on the post-treatment affective ratings for both parties, as I found during the pilot study that this measure was the only significant variable across all hypothesis models. I will first employ two Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors, one for each party, regressing the party-specific post-treatment feeling thermometer ratings onto a three-way interaction between the treatment, partisan identity, and party-specific pre-treatment feeling thermometer rating as a continuous moderator. No other covariates will be included at outset.
+``` {r}
+model_ft_dem <- lm_robust(ft_dem_post ~ condition_dummy*PID_dummy*ft_dem_pre, data = data_clean)
+model_ft_rep <- lm_robust(ft_rep_post ~ condition_dummy*PID_dummy*ft_rep_pre, data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(model_ft_dem), digits = 3, format = "pipe", caption = "FT Democrat")
+knitr::kable(broom::tidy(model_ft_rep), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r}
+# |--------------------------------|
+#         EXP_GROUP_CATEGORY
+# |--------------------------------|
+# 1.1: plot for Democratic Party FT
+ggplot(data_clean, aes(x = ft_dem_pre, y = ft_dem_post,
+                       color = exp_group_category, fill = exp_group_category, group = exp_group_category)) +
+  geom_point() + 
+  geom_smooth(method = "lm_robust", se = TRUE) +
+  scale_color_manual(name = "Group", values = c("firebrick", "midnightblue","violetred", "dodgerblue"),
+                     labels = c("Control (R)", "Control (D)", "Treatment (R)", "Treatment (D)")) +
+  scale_fill_manual(name = "Group", values = c("lightsalmon", "lightsteelblue","lightpink", "lightblue"),
+                    labels = c("Control (R)", "Control (D)", "Treatment (R)", "Treatment (D)")) +
+  labs(x = "Pre-Treatment Ratings",
+       y = "Post-Treatment Ratings",
+       title = "Post-Treatment Affective Ratings for Democratic Party By Pre-Treatment Affective Ratings") +
+  theme_minimal()
+
+# 1.2: plot for Republican Party FT
+ggplot(data_clean, aes(x = ft_rep_pre, y = ft_rep_post,
+                       color = exp_group_category, fill = exp_group_category, group = exp_group_category)) +
+  geom_point() +
+  geom_smooth(method = "lm_robust", se = TRUE) +
+  scale_color_manual(name = "Group", values = c("firebrick", "midnightblue","violetred", "dodgerblue"),
+                     labels = c("Control (R)", "Control (D)", "Treatment (R)", "Treatment (D)")) +
+  scale_fill_manual(name = "Group", values = c("lightsalmon", "lightsteelblue","lightpink", "lightblue"),
+                    labels = c("Control (R)", "Control (D)", "Treatment (R)", "Treatment (D)")) +
+  labs(x = "Pre-Treatment Ratings",
+       y = "Post-Treatment Ratings",
+       title = "Post-Treatment Affective Ratings for Republican Party By Pre-Treatment Affective Ratings") +
+  theme_minimal()
+```
+``` {r}
+# |--------------------------------|
+#            PARTY_BIN
+# |--------------------------------|
+# 2.1: plot for Democratic Party FT
+ggplot(data_clean, aes(x = ft_dem_pre, y = ft_dem_post,
+                       color = party_category, fill = party_category, group = party_category)) +
+  geom_point() + 
+  geom_smooth(method = "lm_robust", se = TRUE) +
+  scale_color_manual(name = "Party ID", values = c("orchid", "dodgerblue", "firebrick"),
+                     labels = c("Independent", "Democrat", "Republican")) +
+  scale_fill_manual(name = "Party ID", values = c("thistle", "lightblue", "lightpink"),
+                    labels = c("Independent", "Democrat", "Republican")) +
+  labs(x = "Pre-Treatment Ratings",
+       y = "Post-Treatment Ratings",
+       title = "Post-Treatment Affective Ratings for Democratic Party By Party ID") +
+  theme_minimal()
+# 2.2: plot for Democratic Party FT   
+ggplot(data_clean, aes(x = ft_rep_pre, y = ft_rep_post,
+                       color = party_category, fill = party_category, group = party_category)) +
+  geom_point() +
+  geom_smooth(method = "lm_robust", se = TRUE) +
+  scale_color_manual(name = "Party ID", values = c("orchid", "dodgerblue", "firebrick"),
+                     labels = c("Independent", "Democrat", "Republican")) +
+  scale_fill_manual(name = "Party ID", values = c("thistle", "lightblue", "lightpink"),
+                    labels = c("Independent", "Democrat", "Republican")) +
+  labs(x = "Pre-Treatment Ratings",
+       y = "Post-Treatment Ratings",
+       title = "Post-Treatment Affective Ratings for Republican Party By Party ID") +
+  theme_minimal()
+```
+
+I will then craft separate exploratory models adding the following covariates individually: PID strength, MAGA support, ideology, and the expanded party scale. Given that I focus on both affective ratings for the Democratic and Republican Party post-treatment, I will produce two models per individual covariate, i.e., two models for PID strength, two for MAGA support, etc. For the expanded party scale, I will replace the dichotomous variable for partisan identification with the 7-point ANES scale, producing a three-way interaction between the treatment, the expanded party scale, and the party-specific pre-treatment feeling thermometer rating. For PID strength, MAGA support, and ideology, I will add a three-way interaction between the treatment, the dichotomous measure of partisanship, and the chosen covariate to the initial model described. 
+``` {r, include=FALSE}
+# ==================================================
+# Panel A: raw mean of the MODERATOR (y) by party_numeric (x)
+#          colored by exp_group_category
+# Panel B: raw diff-in-means of POST-TREATMENT FT (y)
+#          by party_numeric (x), with lm_robust regression overlay
+# x-axis is always party_numeric in both panels
+# ==================================================
+
+library(tidyverse)
+library(patchwork)
+library(estimatr)
+library(emmeans)
+library(stargazer)
+
+# ── shared aesthetics (from 4-9-26.R) ───────────────────────────
+pid_breaks <- c(1, 2, 3, 5, 6, 7)
+pid_labels <- c("Strong D", "Weak D", "Lean D", "Lean R", "Weak R", "Strong R")
+
+pid_colors <- c(
+  "1" = "midnightblue", "2" = "dodgerblue", "3" = "steelblue",
+  "5" = "salmon",       "6" = "firebrick",  "7" = "darkred"
+)
+
+exp_group_colors <- c(
+  "Control R"   = "darkred",
+  "Treatment R" = "hotpink",
+  "Control D"   = "midnightblue",
+  "Treatment D" = "dodgerblue"
+)
+
+base_theme <- theme_minimal(base_size = 11) +
+  theme(axis.text.x      = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank())
+
+# ── Panel A helper ───────────────────────────────────────────────
+# mod_var : string name of the moderator column shown on y-axis
+# y_label : y-axis label string
+make_pA <- function(data, mod_var, y_label) {
+  data |>
+    filter(!is.na(exp_group_category),
+           !is.na(.data[[mod_var]]),
+           party_numeric %in% pid_breaks) |>
+    group_by(party_numeric, exp_group_category) |>
+    summarise(mean_y = mean(.data[[mod_var]], na.rm = TRUE),
+              se_y   = sd(.data[[mod_var]],   na.rm = TRUE) / sqrt(n()),
+              .groups = "drop") |>
+    ggplot(aes(x = factor(party_numeric), y = mean_y,
+               color = exp_group_category)) +
+    geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                      ymax = mean_y + 1.96 * se_y),
+                  width = 0.15, linewidth = 0.6,
+                  position = position_dodge(width = 0.4)) +
+    geom_point(size = 3, position = position_dodge(width = 0.4)) +
+    scale_x_discrete(labels = pid_labels) +
+    scale_color_manual(values = exp_group_colors, name = "Condition") +
+    labs(title = "A", x = NULL, y = y_label) +
+    base_theme +
+    theme(legend.position = "bottom")
+}
+
+# ── Panel B helper ───────────────────────────────────────────────
+# contr_df : output of as.data.frame(confint(contrast(...)))
+# y_label  : y-axis label string
+make_pB <- function(contr_df, y_label) {
+  ggplot(contr_df, aes(x = party_numeric, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_smooth(method = "lm_robust", se = TRUE,
+                color = "grey20", fill = "grey60",
+                alpha = 0.2, linewidth = 0.9) +
+    geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                      color = factor(party_numeric)),
+                  width = 0.15, linewidth = 0.6) +
+    geom_point(aes(color = factor(party_numeric)), size = 3) +
+    scale_color_manual(values = pid_colors, guide = "none") +
+    scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+    labs(title = "B", x = "Party Affiliation Strength", y = y_label) +
+    base_theme
+}
+
+# ── Build Panel B contrast dfs once — reused across all sections ─
+# Democratic FT
+ft_D_fac <- lm_robust(ft_dem_post ~ condition_dummy * factor(party_numeric),
+                      data = data_clean, se_type = "HC2")
+contr_ft_D_df <- as.data.frame(confint(contrast(
+  emmeans(ft_D_fac, ~ condition_dummy | party_numeric,
+          vcov. = vcov(ft_D_fac)),
+  method = list("Treatment - Control" = c(-1, 1)),
+  by = "party_numeric")))
+
+# Republican FT
+ft_R_fac <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric),
+                      data = data_clean, se_type = "HC2")
+contr_ft_R_df <- as.data.frame(confint(contrast(
+  emmeans(ft_R_fac, ~ condition_dummy | party_numeric,
+          vcov. = vcov(ft_R_fac)),
+  method = list("Treatment - Control" = c(-1, 1)),
+  by = "party_numeric")))
+```
+
+### Partisan Self-Concept
+
+#### Democrats
+``` {r}
+lm_dem_pidstr <- lm_robust(ft_dem_post ~ condition_dummy*PID_dummy*ft_dem_pre
+                           + condition_dummy*PID_dummy*PID_strength,
+                           data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_dem_pidstr), digits = 3, format = "pipe", caption = "FT Democrat")
+```
+``` {r, include = FALSE}
+ate_dem_pidstr <- coef(lm_dem_pidstr)["condition_dummy"]
+print(ate_dem_pidstr)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "PID_strength", "Partisan Self-Concept\n(raw mean)") /
+  make_pB(contr_ft_D_df, "FT: Democratic Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Democratic Party) by Party ID | Covariate: Partisan Self-Concept")
+```
+
+#### Republicans
+``` {r}
+lm_rep_pidstr <- lm_robust(ft_rep_post ~ condition_dummy*PID_dummy*ft_rep_pre
+                           + condition_dummy*PID_dummy*PID_strength,
+                           data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_rep_pidstr), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r, include = FALSE}
+ate_rep_pidstr <- coef(lm_rep_pidstr)["condition_dummy"]
+print(ate_rep_pidstr)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "PID_strength", "Partisan Self-Concept\n(raw mean)") /
+  make_pB(contr_ft_R_df, "FT: Republican Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Republican Party) by Party ID | Covariate: Partisan Self-Concept")
+```
+
+### MAGA
+
+#### Democrats
+``` {r}
+lm_maga_D <- lm_robust(ft_dem_post ~ condition_dummy*PID_dummy*ft_dem_pre
+                       + maga*condition_dummy*PID_dummy, data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_maga_D), digits = 3, format = "pipe", caption = "FT Democrat")
+```
+``` {r, include = FALSE}
+ate_dem_maga <- coef(lm_maga_D)["condition_dummy"]
+print(ate_dem_maga)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "maga", "MAGA Support\n(raw mean)") /
+  make_pB(contr_ft_D_df, "FT: Democratic Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Democratic Party) by Party ID | Covariate: MAGA Support")
+```
+
+#### Republicans
+``` {r}
+lm_maga_R <- lm_robust(ft_rep_post ~ condition_dummy*PID_dummy*ft_rep_pre
+                       + maga*condition_dummy*PID_dummy, data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_maga_R), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r, include = FALSE}
+ate_rep_maga <- coef(lm_maga_R)["condition_dummy"]
+print(ate_rep_maga)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "maga", "MAGA Support\n(raw mean)") /
+  make_pB(contr_ft_R_df, "FT: Republican Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Republican Party) by Party ID | Covariate: MAGA Support")
+```
+
+### Ideology
+
+#### Democrats
+``` {r}
+lm_ideology_selfreport_D <- lm_robust(
+  ft_dem_post ~ condition_dummy*PID_dummy*ft_dem_pre
+  + condition_dummy*PID_dummy*ideology_selfreport,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_ideology_selfreport_D), digits = 3, format = "pipe", caption = "FT Democrat")
+```
+``` {r, include = FALSE}
+ate_dem_ideology <- coef(lm_ideology_selfreport_D)["condition_dummy"]
+print(ate_dem_ideology)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "ideology_selfreport", "Self-Reported Ideology\n(raw mean)") /
+  make_pB(contr_ft_D_df, "FT: Democratic Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Democratic Party) by Party ID | Covariate: Ideology")
+```
+
+#### Republicans
+``` {r}
+lm_ideology_selfreport_R <- lm_robust(
+  ft_rep_post ~ condition_dummy*PID_dummy*ft_rep_pre
+  + condition_dummy*PID_dummy*ideology_selfreport,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_ideology_selfreport_R), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r, include = FALSE}
+ate_rep_ideology <- coef(lm_ideology_selfreport_R)["condition_dummy"]
+print(ate_rep_ideology)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "ideology_selfreport", "Self-Reported Ideology\n(raw mean)") /
+  make_pB(contr_ft_R_df, "FT: Republican Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Republican Party) by Party ID | Covariate: Ideology")
+```
+
+### Party ID Strength (7-pt)
+
+#### Democrats
+``` {r}
+lm_party_numeric_D <- lm_robust(
+  ft_dem_post ~ condition_dummy*party_numeric*ft_dem_pre,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_party_numeric_D), digits = 3, format = "pipe", caption = "FT Democrat")
+```
+``` {r, include = FALSE}
+ate_dem_party_numeric <- coef(lm_party_numeric_D)["condition_dummy"]
+print(ate_dem_party_numeric)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "ft_dem_pre", "Pre-Treatment FT: Democratic Party\n(raw mean)") /
+  make_pB(contr_ft_D_df, "FT: Democratic Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Democratic Party) by Party Affiliation Strength")
+```
+
+#### Republicans
+``` {r}
+lm_party_numeric_R <- lm_robust(
+  ft_rep_post ~ condition_dummy*party_numeric*ft_rep_pre,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_party_numeric_R), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r, include = FALSE}
+ate_rep_party_numeric <- coef(lm_party_numeric_R)["condition_dummy"]
+print(ate_rep_party_numeric)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "ft_rep_pre", "Pre-Treatment FT: Republican Party\n(raw mean)") /
+  make_pB(contr_ft_R_df, "FT: Republican Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Republican Party) by Party Affiliation Strength")
+```
+
+### Social Closeness
+
+*I deviate from the pre-analysis plan by also including social closeness as a covariate against the same outcome variables and main predictor variables.*
+
+#### Democrats
+``` {r}
+lm_social_closeness_D <- lm_robust(
+  ft_dem_post ~ condition_dummy*PID_dummy*ft_dem_pre
+  + condition_dummy*PID_dummy*social_closeness,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_social_closeness_D), digits = 3, format = "pipe", caption = "FT Democrat")
+```
+``` {r, include = FALSE}
+ate_dem_ideology <- coef(lm_social_closeness_D)["condition_dummy"]
+print(ate_dem_ideology)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "social_closeness", "Social Closeness\n(raw mean)") /
+  make_pB(contr_ft_D_df, "FT: Democratic Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Democratic Party) by Party ID | Covariate: Social Closeness")
+```
+
+#### Republicans
+``` {r}
+lm_social_closeness_R <- lm_robust(
+  ft_rep_post ~ condition_dummy*PID_dummy*ft_rep_pre
+  + condition_dummy*PID_dummy*social_closeness,
+  data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_social_closeness_R), digits = 3, format = "pipe", caption = "FT Republican")
+```
+``` {r, include = FALSE}
+ate_rep_ideology <- coef(lm_social_closeness_R)["condition_dummy"]
+print(ate_rep_ideology)
+```
+``` {r, fig.width = 7, fig.height = 9}
+make_pA(data_clean, "social_closeness", "Social Closeness\n(raw mean)") /
+  make_pB(contr_ft_R_df, "FT: Republican Party\nDiff in Means (Treatment - Control)") +
+  plot_annotation(
+    title = "Figure: Post-Treatment FT (Republican Party) by Party ID | Covariate: Social Closeness")
+```
+
+
+## Hypotheses Tests With Covariates
+
+Additionally, I outline several exploratory analyses focused on support for political violence within each defined scenario.  Primarily, I will doing an exploratory test of all included measures related to participants’ political “identification”, i.e., partisan identification, ideology, partisan self-concept and social closeness. I will craft a second Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors for each of the 14 proposed hypotheses previously outlined to determine whether the introduction of any additional pre-treatment covariates alters the significance of the treatment effect. I have selected support for the MAGA movement, self-reported ideology, partisan self-concept, and social closeness as our socio-political variables of interest across all models, with ideology and MAGA support as the only two variables which I do not interact with the treatment given that the others correspond more strongly to partisanship as a social and political identity rather than a labeled affiliation.
+
+``` {r, include = FALSE}
+# Panel A: built ONCE per hypothesis from raw data — never changes
+# Panel B: only thing that changes — simple vs covariate contrast df
+#
+# Structure per hypothesis:
+#   pA        <- built once from raw group means
+#   pB        <- factor model contrasts (simple)
+#   pB_cov    <- covariate model contrasts (+ covariates)
+#   pA / pB     -> simple figure
+#   pA / pB_cov -> covariate figure
+# ==================================================
+
+library(tidyverse)
+library(patchwork)
+library(estimatr)
+library(emmeans)
+
+# ── shared aesthetics ────────────────────────────────────────────
+pid_breaks <- c(1, 2, 3, 5, 6, 7)
+pid_labels <- c("Strong D", "Weak D", "Lean D", "Lean R", "Weak R", "Strong R")
+
+pid_colors <- c(
+  "1" = "midnightblue", "2" = "dodgerblue", "3" = "steelblue",
+  "5" = "salmon",       "6" = "firebrick",  "7" = "darkred"
+)
+
+exp_group_colors <- c(
+  "Control R"   = "darkred",
+  "Treatment R" = "hotpink",
+  "Control D"   = "midnightblue",
+  "Treatment D" = "dodgerblue"
+)
+
+base_theme <- theme_minimal(base_size = 11) +
+  theme(axis.text.x      = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank())
+
+# ── Panel A: raw outcome means by party_numeric x exp_group_category
+make_pA <- function(outcome_var, y_label) {
+  data_clean |>
+    filter(!is.na(exp_group_category)) |>
+    group_by(party_numeric, exp_group_category) |>
+    summarise(mean_y = mean(.data[[outcome_var]], na.rm = TRUE),
+              se_y   = sd(.data[[outcome_var]],   na.rm = TRUE) / sqrt(n()),
+              .groups = "drop") |>
+    ggplot(aes(x = factor(party_numeric), y = mean_y,
+               color = exp_group_category)) +
+    geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                      ymax = mean_y + 1.96 * se_y),
+                  width = 0.15, linewidth = 0.6,
+                  position = position_dodge(width = 0.4)) +
+    geom_point(size = 3, position = position_dodge(width = 0.4)) +
+    scale_x_discrete(labels = pid_labels) +
+    scale_color_manual(values = exp_group_colors, name = "Condition") +
+    labs(title = "A", x = NULL, y = y_label) +
+    base_theme +
+    theme(legend.position = "bottom")
+}
+
+# ── Panel B: diff-in-means + regression line (only this changes) ─
+make_pB <- function(df, y_label = "Difference in Means") {
+  ggplot(df, aes(x = party_numeric, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_smooth(method = "lm_robust", se = TRUE,
+                color = "grey20", fill = "grey60",
+                alpha = 0.2, linewidth = 0.9) +
+    geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL,
+                      color = factor(party_numeric)),
+                  width = 0.15, linewidth = 0.6) +
+    geom_point(aes(color = factor(party_numeric)), size = 3) +
+    scale_color_manual(values = pid_colors, guide = "none") +
+    scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+    labs(title = "B", x = "Party ID", y = y_label) +
+    base_theme
+}
+
+# ── Contrast df from any model ────────────────────────────────────
+get_contr_df <- function(model) {
+  emm_factor <- emmeans(
+    model,
+    ~ condition_dummy | party_numeric,
+    vcov. = vcov(model)
+  )
+  contr_factor_df <- confint(
+    contrast(
+      emm_factor,
+      method = list("Treatment - Control" = c(-1, 1)),
+      by = "party_numeric"
+    )
+  ) |>
+    as.data.frame() |>
+    mutate(
+      party_numeric = as.numeric(as.character(party_numeric))
+    )
+  
+  return(contr_factor_df)
+}
+
+```
+
+### Hypothesis 1
+``` {r}
+H1_cov <- lm_robust(SPV_meta_R ~ condition_dummy * factor(party_numeric)
+                    + condition_dummy * PID_strength
+                    + condition_dummy * social_closeness
+                    + ideology_selfreport
+                    + maga,
+                    data = data_clean, se_type = "HC2")
+```
+```{r, echo = FALSE}
+knitr::kable(broom::tidy(H1_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+pA_H1_cov    <- make_pA("SPV_meta_R", "Meta-Perceptions of Republican SPV\n(raw mean)")
+pB_H1_cov <- make_pB(get_contr_df(H1_cov))
+
+pA_H1_cov / pB_H1_cov
+```
+
+### Hypothesis 2
+``` {r}
+H2_cov <- lm_robust(moral_disengagement_outgroup ~ condition_dummy * factor(party_numeric)
+                    + condition_dummy * PID_strength
+                    + condition_dummy * social_closeness
+                    + ideology_selfreport
+                    + maga,
+                    data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H2_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+pA_H2_cov     <- make_pA("moral_disengagement_outgroup", "Moral Disengagement (Out-Party)\n(raw mean)")
+pB_H2_cov <- make_pB(get_contr_df(H2_cov))
+
+pA_H2_cov / pB_H2_cov
+```
+
+### Hypothesis 3
+``` {r}
+H3_cov <- lm_robust(SPV_individual ~ condition_dummy * factor(party_numeric)
+                    + condition_dummy * PID_strength
+                    + condition_dummy * social_closeness
+                    + ideology_selfreport
+                    + maga,
+                    data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H3_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+pA_H3_cov     <- make_pA("SPV_individual", "Individual SPV\n(raw mean)")
+pB_H3_cov <- make_pB(get_contr_df(H3_cov))
+
+pA_H3_cov / pB_H3_cov
+```
+
+Beginning with Hypothesis 4a, I include the pre-treatment affective ratings for both the Republican and Democratic Party, with the former transitioning into a treatment interaction term in Hypothesis 4b and the latter transitioning into a treatment interaction term in Hypothesis 5a.
+
+### Hypothesis 4a
+``` {r}
+H4a_cov <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric)
+                     + condition_dummy * PID_strength
+                     + condition_dummy * social_closeness
+                     + ideology_selfreport
+                     + maga
+                     + ft_rep_pre
+                     + ft_dem_pre,
+                     data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4a_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+pA_H4a_cov <- make_pA("ft_rep_post", "Affective Ratings:\nRepublican Party\n(raw mean)")
+pB_H4a_cov <- make_pB(get_contr_df(H4a_cov))
+
+pA_H4a_cov / pB_H4a_cov
+```
+
+### Hypothesis 4b
+``` {r}
+H4b_cov <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric)
+                     + condition_dummy * PID_strength
+                     + condition_dummy * social_closeness
+                     + condition_dummy * ft_rep_pre
+                     + ideology_selfreport
+                     + maga
+                     + ft_dem_pre,
+                     data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H4b_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+pA_H4b_cov <- make_pA("ft_rep_pre", "Affective Ratings:\nRepublican Party\n(pre-treatment mean)")
+pB_H4b_cov <- make_pB(get_contr_df(H4b_cov))
+
+pA_H4b_cov / pB_H4b_cov
+```
+
+### Hypothesis 5
+``` {r, include = FALSE}
+# ════════════════════════════════════════════════════════════════
+#   H5 & H6: FT BY PARTY_NUMERIC × PID_BIN
+#   Panel A: raw means by condition (Control/Treatment)
+#   Panel B: diff-in-means, one figure per PID_bin level
+# ════════════════════════════════════════════════════════════════
+
+# PID_bin numeric → label lookup (used consistently everywhere)
+pid_bin_map <- c("0" = "Weak", "1" = "Medium", "2" = "Strong")
+
+# ── Panel A for H5/H6: condition only (no exp_group_category) ───
+# pid_bin_num: numeric value (0, 1, or 2) matching PID_bin in data_clean
+make_pA_pidbin <- function(outcome_var, pid_bin_num, y_label) {
+  data_clean |>
+    filter(!is.na(condition_dummy),
+           PID_bin == pid_bin_num) |>
+    mutate(condition = factor(condition_dummy, levels = c(0, 1),
+                              labels = c("Control", "Treatment"))) |>
+    group_by(party_numeric, condition) |>
+    summarise(mean_y = mean(.data[[outcome_var]], na.rm = TRUE),
+              se_y   = sd(.data[[outcome_var]],   na.rm = TRUE) / sqrt(n()),
+              .groups = "drop") |>
+    ggplot(aes(x = factor(party_numeric), y = mean_y, color = condition)) +
+    geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                      ymax = mean_y + 1.96 * se_y),
+                  width = 0.15, linewidth = 0.6,
+                  position = position_dodge(width = 0.4)) +
+    geom_point(size = 3, position = position_dodge(width = 0.4)) +
+    scale_x_discrete(labels = pid_labels) +
+    scale_color_manual(values = c("Control" = "darkred", "Treatment" = "hotpink"),
+                       name = "Condition") +
+    labs(title = "A", x = NULL, y = y_label) +
+    base_theme +
+    theme(legend.position = "bottom")
+}
+
+# ── Panel B for H5/H6: filter on numeric PID_bin, pass clean df to make_pB ─
+# pid_bin_num: numeric value (0, 1, or 2)
+make_pB_pidbin <- function(df, pid_bin_num) {
+  df <- df |>
+    filter(PID_bin == pid_bin_num) |>
+    mutate(party_numeric = as.numeric(party_numeric))
+  make_pB(df)
+}
+
+# ── Get contrast dfs — keep PID_bin as numeric for reliable filtering ────────
+get_contr_df_pidbin <- function(model) {
+  
+  emm_factor <- emmeans(
+    model,
+    ~ condition_dummy | party_numeric + PID_bin,
+    at = list(
+      party_numeric = c(1, 2, 3, 5, 6, 7),
+      PID_bin = c(0, 1, 2)
+    ),
+    vcov. = vcov(model)
+  )
+  
+  contr_factor_df <- confint(
+    contrast(
+      emm_factor,
+      method = list("Treatment - Control" = c(-1, 1)),
+      by = c("party_numeric", "PID_bin")
+    )
+  ) |>
+    as.data.frame() |>
+    mutate(
+      party_numeric = as.numeric(as.character(party_numeric)),
+      PID_bin = as.numeric(as.character(PID_bin))
+    )
+  
+  return(contr_factor_df)
+}
+```
+``` {r}
+H5_cov <- lm_robust(ft_rep_post ~ condition_dummy * factor(party_numeric) * PID_bin
+                    + condition_dummy * social_closeness
+                    + condition_dummy * ft_rep_pre
+                    + condition_dummy * ft_dem_pre
+                    + ideology_selfreport
+                    + maga,
+                    data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H5_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE}
+
+for (bin_num in c(0, 1, 2)) {
+  bin_lbl <- pid_bin_map[as.character(bin_num)]
+
+  pA <- make_pA_pidbin(
+    "ft_rep_post", bin_num,
+    "Affective Ratings:\nRepublican Party\n(raw mean)"
+  )
+
+  print(
+    pA / make_pB_pidbin(get_contr_df_pidbin(H5_cov), bin_num) +
+      plot_annotation(
+        title = paste0("Figure 4.5: Republican Party Ratings ", bin_lbl, " PID Strength")
+      )
+  )
+}
+```
+
+### Hypothesis 6
+``` {r}
+H6_cov <- lm_robust(ft_dem_post ~ condition_dummy * factor(party_numeric) * PID_bin
+                    + condition_dummy * social_closeness
+                    + condition_dummy * ft_rep_pre
+                    + condition_dummy * ft_dem_pre
+                    + ideology_selfreport
+                    + maga,
+                    data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(H6_cov), digits = 3, format = "pipe")
+```
+```{r , echo=FALSE, fig.width = 7, fig.height = 9}
+
+for (bin_num in c(0, 1, 2)) {
+  bin_lbl <- pid_bin_map[as.character(bin_num)]
+
+  pA <- make_pA_pidbin(
+    "ft_dem_post", bin_num,
+    "Affective Ratings:\nDemocratic Party\n(raw mean)"
+  )
+
+  print(
+    pA / make_pB_pidbin(get_contr_df_pidbin(H6_cov), bin_num) +
+      plot_annotation(
+        title = paste0("Figure 4.6: Democratic Party Ratings ", bin_lbl, " PID Strength")
+      )
+  )
+}
+```
+
+## Scenario-Specific SPV 
+
+On the micro level, across each of the six scenarios, I will conduct two Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors, one focused on individual support for political violence and the other on meta-perceptions of Republicans’ support for political violence. For the former, I will create two additional Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors to distinguish between Republicans’ reported SPV and Democrats’ reported SPV within each SPV scenario. Across each of these four models, I plan to regress each of the six scenario-specific measures of SPV separately onto a three-way interaction between condition assignment, the numeric version of the ANES 7-point party identification scale, and the grouped version of partisan self-concept  used in Hypotheses 5a through 6c. Additional specified covariates include the interaction between the treatment and social closeness, support for the MAGA movement, and self-reported ideology.
+
+``` {r, include=FALSE}
+library(tidyverse)
+library(patchwork)
+
+# ══════════════════════════════════════════════════════════════════
+#   SHARED
+# ══════════════════════════════════════════════════════════════════
+pid_breaks <- c(1, 2, 3, 5, 6, 7)
+pid_labels <- c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")
+
+pid_colors <- c("1" = "midnightblue", "2" = "dodgerblue", "3" = "steelblue",
+                "5" = "salmon",       "6" = "firebrick",  "7" = "darkred")
+
+base_theme <- theme_minimal(base_size = 11) +
+  theme(axis.text.x    = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank())
+
+
+# ==================================================
+#                       SPV
+# ==================================================
+
+# ── SHARED PANEL FUNCTION ────────────────────────
+make_SPV_panels <- function(outcome_var, linear_df, factor_df, y_label_A, fig_title, color_A) {
+  
+  pA <- data_clean |>
+    filter(!is.na(exp_group_category)) |>
+    group_by(party_numeric, exp_group_category) |>
+    summarise(
+      mean_y = mean(.data[[outcome_var]], na.rm = TRUE),
+      se_y   = sd(.data[[outcome_var]], na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    ) |>
+    ggplot(aes(x = factor(party_numeric), y = mean_y, color = exp_group_category)) +
+    geom_errorbar(aes(ymin = mean_y - 1.96 * se_y,
+                      ymax = mean_y + 1.96 * se_y),
+                  width = 0.15, linewidth = 0.6,
+                  position = position_dodge(width = 0.4)) +
+    geom_point(size = 3, position = position_dodge(width = 0.4)) +
+    scale_x_discrete(labels = pid_labels) +
+    scale_color_manual(values = color_A, name = "Condition") +
+    labs(title = "A", x = NULL, y = y_label_A) +
+    base_theme +
+    theme(legend.position = "bottom")
+  
+  pB <- ggplot(linear_df, aes(x = party_numeric, y = estimate)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    geom_smooth(method = "lm_robust", se = TRUE,
+                color = "grey20", fill = "grey60",
+                alpha = 0.2, linewidth = 0.9) +
+    geom_errorbar(data = factor_df,
+                  aes(ymin = lower.CL, ymax = upper.CL,
+                      color = factor(party_numeric)),
+                  width = 0.15, linewidth = 0.6) +
+    geom_point(data = factor_df,
+               aes(y = estimate, color = factor(party_numeric)), size = 3) +
+    scale_color_manual(values = pid_colors, guide = "none") +
+    scale_x_continuous(breaks = pid_breaks, labels = pid_labels) +
+    labs(title = "B", x = "Party ID",
+         y = "Difference in Means") +
+    base_theme
+  
+  pA / pB + plot_annotation(title = fig_title)
+}
+```
+
+*I deviated from the pre-analysis plan by removing the additional specified covariates from each model, as this simplifies the ability to draw conclusions about the average treatment effect. The only covariates included are PID_dummy, which represents the dichotomous effect of being a Democrat versus a Republican, and PID_bin, the grouped version of partisan self-concept. *
+
+### Scenario: Protesting without a permit
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_protest_indiv <- lm_robust(SPV_indiv_protest ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_protest_meta_R <- lm_robust(SPV_meta_protest ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_protest <- lm_robust(spv_Rprotest ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_protest <- lm_robust(spv_Dprotest ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_protest_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_protest_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_protest),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_protest),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_protest_indiv <- emmeans(lm_protest_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_protest_indiv))
+emm_protest_indiv_df <- as.data.frame(confint(emm_protest_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_protest_indiv <- contrast(emm_protest_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_protest_indiv_df <- as.data.frame(confint(contr_protest_indiv))
+contr_table_protest_indiv <- summary(contr_protest_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_protest_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_protest_meta_R <- emmeans(lm_protest_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_protest_meta_R))
+emm_protest_meta_R_df <- as.data.frame(confint(emm_protest_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_protest_meta_R <- contrast(emm_protest_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_protest_meta_R_df <- as.data.frame(confint(contr_protest_meta_R))
+contr_table_protest_meta_R <- summary(contr_protest_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_protest_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+protest_indiv_partyaffil <- lm_robust(SPV_indiv_protest ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_protest_indiv_partyaffil<- emmeans(protest_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(protest_indiv_partyaffil))
+contr_protest_indiv_partyaffil<- contrast(emm_protest_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_protest_indiv_partyaffil_df <- confint(contr_protest_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_protest_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+protest_meta_R_partyaffil <- lm_robust(SPV_meta_protest ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_protest_meta_R_partyaffil<- emmeans(protest_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(protest_meta_R_partyaffil))
+contr_protest_meta_R_partyaffil<- contrast(emm_protest_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_protest_meta_R_partyaffil_df <- confint(contr_protest_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_protest_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_protest_indiv_R_7 <- lm_robust(SPV_indiv_protest ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_protest_indiv_R_7<- emmeans(lm_protest_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_protest_indiv_R_7))
+contr_protest_indiv_R_7<- contrast(emm_protest_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_protest_indiv_R_7_df <- as.data.frame(confint(contr_protest_indiv_R_7))
+contr_table_protest_indiv_R_7_df <- summary(contr_protest_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_protest_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_protest_meta_R_7 <- lm_robust(SPV_meta_protest ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_protest_meta_R_7<- emmeans(lm_protest_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_protest_meta_R_7))
+contr_protest_meta_R_7<- contrast(emm_protest_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_protest_meta_R_7_df <- as.data.frame(confint(contr_protest_meta_R_7))
+contr_table_protest_meta_R_7_df <- summary(contr_protest_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_protest_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+protest_indiv_factor <- lm_robust(SPV_indiv_protest ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_protest_indiv_factor <- emmeans(protest_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(protest_indiv_factor))
+contr_protest_indiv_factor_df <- confint(contrast(emm_protest_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+protest_meta_R_factor <- lm_robust(SPV_meta_protest ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_protest_meta_R_factor <- emmeans(protest_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(protest_meta_R_factor))
+contr_protest_meta_R_factor_df <- confint(contrast(emm_protest_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_protest_indiv <- make_SPV_panels(
+  "SPV_indiv_protest",
+  contr_protest_indiv_partyaffil_df,
+  contr_protest_indiv_factor_df,
+  "Individual SPV: Protest\n(raw mean)",
+  "Figure: Protest Without a Permit — Individual Ratings",
+  color_A = c("Control R" = "firebrick", "Treatment R" = "salmon",
+              "Control D" = "hotpink",   "Treatment D" = "pink"))
+
+p_protest_meta_R <- make_SPV_panels(
+  "SPV_meta_protest",
+  contr_protest_meta_R_partyaffil_df,
+  contr_protest_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Protest\n(raw mean)",
+  "Figure: Protest Without a Permit — Meta-Perceptions",
+  color_A = c("Control R" = "firebrick", "Treatment R" = "salmon",
+              "Control D" = "hotpink",   "Treatment D" = "pink"))
+```
+```{r , echo=FALSE}
+p_protest_indiv
+p_protest_meta_R
+```
+
+### Scenario: Vandalizing opposing party's signs
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_vandalize_indiv <- lm_robust(SPV_indiv_vandalize ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_vandalize_meta_R <- lm_robust(SPV_meta_vandalize ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_vandalize <- lm_robust(spv_Rvandalize ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_vandalize <- lm_robust(spv_Dvandalize ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_vandalize_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_vandalize_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_vandalize),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_vandalize),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_vandalize_indiv <- emmeans(lm_vandalize_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_vandalize_indiv))
+emm_vandalize_indiv_df <- as.data.frame(confint(emm_vandalize_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_vandalize_indiv <- contrast(emm_vandalize_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_vandalize_indiv_df <- as.data.frame(confint(contr_vandalize_indiv))
+contr_table_vandalize_indiv <- summary(contr_vandalize_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_vandalize_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_vandalize_meta_R <- emmeans(lm_vandalize_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_vandalize_meta_R))
+emm_vandalize_meta_R_df <- as.data.frame(confint(emm_vandalize_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_vandalize_meta_R <- contrast(emm_vandalize_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_vandalize_meta_R_df <- as.data.frame(confint(contr_vandalize_meta_R))
+contr_table_vandalize_meta_R <- summary(contr_vandalize_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_vandalize_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+vandalize_indiv_partyaffil <- lm_robust(SPV_indiv_vandalize ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_vandalize_indiv_partyaffil<- emmeans(vandalize_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(vandalize_indiv_partyaffil))
+contr_vandalize_indiv_partyaffil<- contrast(emm_vandalize_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_vandalize_indiv_partyaffil_df <- confint(contr_vandalize_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_vandalize_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+vandalize_meta_R_partyaffil <- lm_robust(SPV_meta_vandalize ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_vandalize_meta_R_partyaffil<- emmeans(vandalize_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(vandalize_meta_R_partyaffil))
+contr_vandalize_meta_R_partyaffil<- contrast(emm_vandalize_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_vandalize_meta_R_partyaffil_df <- confint(contr_vandalize_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_vandalize_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_vandalize_indiv_R_7 <- lm_robust(SPV_indiv_vandalize ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_vandalize_indiv_R_7<- emmeans(lm_vandalize_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_vandalize_indiv_R_7))
+contr_vandalize_indiv_R_7<- contrast(emm_vandalize_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_vandalize_indiv_R_7_df <- as.data.frame(confint(contr_vandalize_indiv_R_7))
+contr_table_vandalize_indiv_R_7_df <- summary(contr_vandalize_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_vandalize_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_vandalize_meta_R_7 <- lm_robust(SPV_meta_vandalize ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_vandalize_meta_R_7<- emmeans(lm_vandalize_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_vandalize_meta_R_7))
+contr_vandalize_meta_R_7<- contrast(emm_vandalize_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_vandalize_meta_R_7_df <- as.data.frame(confint(contr_vandalize_meta_R_7))
+contr_table_vandalize_meta_R_7_df <- summary(contr_vandalize_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_vandalize_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+vandalize_indiv_factor <- lm_robust(SPV_indiv_vandalize ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_vandalize_indiv_factor <- emmeans(vandalize_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(vandalize_indiv_factor))
+contr_vandalize_indiv_factor_df <- confint(contrast(emm_vandalize_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+vandalize_meta_R_factor <- lm_robust(SPV_meta_vandalize ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_vandalize_meta_R_factor <- emmeans(vandalize_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(vandalize_meta_R_factor))
+contr_vandalize_meta_R_factor_df <- confint(contrast(emm_vandalize_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_vandalize_indiv <- make_SPV_panels(
+  "SPV_indiv_vandalize",
+  contr_vandalize_indiv_partyaffil_df,
+  contr_vandalize_indiv_factor_df,
+  "Individual SPV: Vandalize\n(raw mean)",
+  "Figure: Vandalizing Opposing Party's Signs — Individual Ratings",
+  color_A = c("Control R" = "darkorange",  "Treatment R" = "lightsalmon",
+              "Control D" = "coral",        "Treatment D" = "peachpuff"))
+
+p_vandalize_meta_R <- make_SPV_panels(
+  "SPV_meta_vandalize",
+  contr_vandalize_meta_R_partyaffil_df,
+  contr_vandalize_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Vandalize\n(raw mean)",
+  "Figure: Vandalizing Opposing Party's Signs — Meta-Perceptions",
+  color_A = c("Control R" = "darkorange",  "Treatment R" = "lightsalmon",
+              "Control D" = "coral",        "Treatment D" = "peachpuff"))
+```
+```{r , echo=FALSE}
+p_vandalize_indiv
+p_vandalize_meta_R
+```
+
+### Scenario: Messaging threats online to an out-party representative
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_message_indiv <- lm_robust(SPV_indiv_message ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_message_meta_R <- lm_robust(SPV_meta_message ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_message <- lm_robust(spv_Rmessage ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_message <- lm_robust(spv_Dmessage ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_message_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_message_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_message),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_message),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_message_indiv <- emmeans(lm_message_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_message_indiv))
+emm_message_indiv_df <- as.data.frame(confint(emm_message_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_message_indiv <- contrast(emm_message_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_message_indiv_df <- as.data.frame(confint(contr_message_indiv))
+contr_table_message_indiv <- summary(contr_message_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_message_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_message_meta_R <- emmeans(lm_message_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_message_meta_R))
+emm_message_meta_R_df <- as.data.frame(confint(emm_message_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_message_meta_R <- contrast(emm_message_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_message_meta_R_df <- as.data.frame(confint(contr_message_meta_R))
+contr_table_message_meta_R <- summary(contr_message_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_message_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+message_indiv_partyaffil <- lm_robust(SPV_indiv_message ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_message_indiv_partyaffil<- emmeans(message_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(message_indiv_partyaffil))
+contr_message_indiv_partyaffil<- contrast(emm_message_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_message_indiv_partyaffil_df <- confint(contr_message_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_message_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+message_meta_R_partyaffil <- lm_robust(SPV_meta_message ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_message_meta_R_partyaffil<- emmeans(message_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(message_meta_R_partyaffil))
+contr_message_meta_R_partyaffil<- contrast(emm_message_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_message_meta_R_partyaffil_df <- confint(contr_message_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_message_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_message_indiv_R_7 <- lm_robust(SPV_indiv_message ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_message_indiv_R_7<- emmeans(lm_message_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_message_indiv_R_7))
+contr_message_indiv_R_7<- contrast(emm_message_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_message_indiv_R_7_df <- as.data.frame(confint(contr_message_indiv_R_7))
+contr_table_message_indiv_R_7_df <- summary(contr_message_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_message_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_message_meta_R_7 <- lm_robust(SPV_meta_message ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_message_meta_R_7<- emmeans(lm_message_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_message_meta_R_7))
+contr_message_meta_R_7<- contrast(emm_message_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_message_meta_R_7_df <- as.data.frame(confint(contr_message_meta_R_7))
+contr_table_message_meta_R_7_df <- summary(contr_message_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_message_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+message_indiv_factor <- lm_robust(SPV_indiv_message ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_message_indiv_factor <- emmeans(message_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(message_indiv_factor))
+contr_message_indiv_factor_df <- confint(contrast(emm_message_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+message_meta_R_factor <- lm_robust(SPV_meta_message ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_message_meta_R_factor <- emmeans(message_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(message_meta_R_factor))
+contr_message_meta_R_factor_df <- confint(contrast(emm_message_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_message_indiv <- make_SPV_panels(
+  "SPV_indiv_message",
+  contr_message_indiv_partyaffil_df,
+  contr_message_indiv_factor_df,
+  "Individual SPV: Message\n(raw mean)",
+  "Figure: Messaging Threats Online — Individual Ratings",
+  color_A = c("Control R" = "goldenrod", "Treatment R" = "khaki",
+              "Control D" = "gold",       "Treatment D" = "wheat"))
+
+p_message_meta_R <- make_SPV_panels(
+  "SPV_meta_message",
+  contr_message_meta_R_partyaffil_df,
+  contr_message_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Message\n(raw mean)",
+  "Figure: Messaging Threats Online — Meta-Perceptions",
+  color_A = c("Control R" = "goldenrod", "Treatment R" = "khaki",
+              "Control D" = "gold",       "Treatment D" = "wheat"))
+```
+```{r , echo=FALSE}
+p_message_indiv
+p_message_meta_R
+```
+
+### Scenario: Physically assaulting an out-party member
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_assault_indiv <- lm_robust(SPV_indiv_assault ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_assault_meta_R <- lm_robust(SPV_meta_assault ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_assault <- lm_robust(spv_Rassault ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_assault <- lm_robust(spv_Dassault ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_assault_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_assault_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_assault),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_assault),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_assault_indiv <- emmeans(lm_assault_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_assault_indiv))
+emm_assault_indiv_df <- as.data.frame(confint(emm_assault_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_assault_indiv <- contrast(emm_assault_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_assault_indiv_df <- as.data.frame(confint(contr_assault_indiv))
+contr_table_assault_indiv <- summary(contr_assault_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_assault_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_assault_meta_R <- emmeans(lm_assault_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_assault_meta_R))
+emm_assault_meta_R_df <- as.data.frame(confint(emm_assault_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_assault_meta_R <- contrast(emm_assault_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_assault_meta_R_df <- as.data.frame(confint(contr_assault_meta_R))
+contr_table_assault_meta_R <- summary(contr_assault_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_assault_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+assault_indiv_partyaffil <- lm_robust(SPV_indiv_assault ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_assault_indiv_partyaffil<- emmeans(assault_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(assault_indiv_partyaffil))
+contr_assault_indiv_partyaffil<- contrast(emm_assault_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_assault_indiv_partyaffil_df <- confint(contr_assault_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_assault_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+assault_meta_R_partyaffil <- lm_robust(SPV_meta_assault ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_assault_meta_R_partyaffil<- emmeans(assault_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(assault_meta_R_partyaffil))
+contr_assault_meta_R_partyaffil<- contrast(emm_assault_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_assault_meta_R_partyaffil_df <- confint(contr_assault_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_assault_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_assault_indiv_R_7 <- lm_robust(SPV_indiv_assault ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_assault_indiv_R_7<- emmeans(lm_assault_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_assault_indiv_R_7))
+contr_assault_indiv_R_7<- contrast(emm_assault_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_assault_indiv_R_7_df <- as.data.frame(confint(contr_assault_indiv_R_7))
+contr_table_assault_indiv_R_7_df <- summary(contr_assault_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_assault_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_assault_meta_R_7 <- lm_robust(SPV_meta_assault ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_assault_meta_R_7<- emmeans(lm_assault_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_assault_meta_R_7))
+contr_assault_meta_R_7<- contrast(emm_assault_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_assault_meta_R_7_df <- as.data.frame(confint(contr_assault_meta_R_7))
+contr_table_assault_meta_R_7_df <- summary(contr_assault_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_assault_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+assault_indiv_factor <- lm_robust(SPV_indiv_assault ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_assault_indiv_factor <- emmeans(assault_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(assault_indiv_factor))
+contr_assault_indiv_factor_df <- confint(contrast(emm_assault_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+assault_meta_R_factor <- lm_robust(SPV_meta_assault ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_assault_meta_R_factor <- emmeans(assault_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(assault_meta_R_factor))
+contr_assault_meta_R_factor_df <- confint(contrast(emm_assault_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_assault_indiv <- make_SPV_panels(
+  "SPV_indiv_assault",
+  contr_assault_indiv_partyaffil_df,
+  contr_assault_indiv_factor_df,
+  "Individual SPV: Assault\n(raw mean)",
+  "Figure: Physically Assaulting an Out-Partisan — Individual Ratings",
+  color_A = c("Control R" = "forestgreen", "Treatment R" = "yellowgreen",
+              "Control D" = "limegreen",    "Treatment D" = "greenyellow"))
+
+p_assault_meta_R <- make_SPV_panels(
+  "SPV_meta_assault",
+  contr_assault_meta_R_partyaffil_df,
+  contr_assault_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Assault\n(raw mean)",
+  "Figure: Physically Assaulting an Out-Partisan — Meta-Perceptions",
+  color_A = c("Control R" = "forestgreen", "Treatment R" = "yellowgreen",
+              "Control D" = "limegreen",    "Treatment D" = "greenyellow"))
+```
+```{r , echo=FALSE}
+p_assault_indiv
+p_assault_meta_R
+```
+
+### Scenario: To achieve political goals
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_justify_indiv <- lm_robust(SPV_indiv_justify ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_justify_meta_R <- lm_robust(SPV_meta_justify ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_justify <- lm_robust(spv_Rjustify ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_justify <- lm_robust(spv_Djustify ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_justify_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_justify_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_justify),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_justify),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_justify_indiv <- emmeans(lm_justify_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_justify_indiv))
+emm_justify_indiv_df <- as.data.frame(confint(emm_justify_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_justify_indiv <- contrast(emm_justify_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_justify_indiv_df <- as.data.frame(confint(contr_justify_indiv))
+contr_table_justify_indiv <- summary(contr_justify_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_justify_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_justify_meta_R <- emmeans(lm_justify_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_justify_meta_R))
+emm_justify_meta_R_df <- as.data.frame(confint(emm_justify_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_justify_meta_R <- contrast(emm_justify_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_justify_meta_R_df <- as.data.frame(confint(contr_justify_meta_R))
+contr_table_justify_meta_R <- summary(contr_justify_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_justify_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+justify_indiv_partyaffil <- lm_robust(SPV_indiv_justify ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_justify_indiv_partyaffil<- emmeans(justify_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(justify_indiv_partyaffil))
+contr_justify_indiv_partyaffil<- contrast(emm_justify_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_justify_indiv_partyaffil_df <- confint(contr_justify_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_justify_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+justify_meta_R_partyaffil <- lm_robust(SPV_meta_justify ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_justify_meta_R_partyaffil<- emmeans(justify_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(justify_meta_R_partyaffil))
+contr_justify_meta_R_partyaffil<- contrast(emm_justify_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_justify_meta_R_partyaffil_df <- confint(contr_justify_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_justify_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_justify_indiv_R_7 <- lm_robust(SPV_indiv_justify ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_justify_indiv_R_7<- emmeans(lm_justify_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_justify_indiv_R_7))
+contr_justify_indiv_R_7<- contrast(emm_justify_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_justify_indiv_R_7_df <- as.data.frame(confint(contr_justify_indiv_R_7))
+contr_table_justify_indiv_R_7_df <- summary(contr_justify_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_justify_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_justify_meta_R_7 <- lm_robust(SPV_meta_justify ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_justify_meta_R_7<- emmeans(lm_justify_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_justify_meta_R_7))
+contr_justify_meta_R_7<- contrast(emm_justify_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_justify_meta_R_7_df <- as.data.frame(confint(contr_justify_meta_R_7))
+contr_table_justify_meta_R_7_df <- summary(contr_justify_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_justify_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+justify_indiv_factor <- lm_robust(SPV_indiv_justify ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_justify_indiv_factor <- emmeans(justify_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(justify_indiv_factor))
+contr_justify_indiv_factor_df <- confint(contrast(emm_justify_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+justify_meta_R_factor <- lm_robust(SPV_meta_justify ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_justify_meta_R_factor <- emmeans(justify_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(justify_meta_R_factor))
+contr_justify_meta_R_factor_df <- confint(contrast(emm_justify_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_justify_indiv <- make_SPV_panels(
+  "SPV_indiv_justify",
+  contr_justify_indiv_partyaffil_df,
+  contr_justify_indiv_factor_df,
+  "Individual SPV: Justify\n(raw mean)",
+  "Figure: Achieving In-Party Political Goals — Individual Ratings",
+  color_A = c("Control R" = "midnightblue", "Treatment R" = "deepskyblue",
+              "Control D" = "dodgerblue",    "Treatment D" = "lightblue"))
+
+p_justify_meta_R <- make_SPV_panels(
+  "SPV_meta_justify",
+  contr_justify_meta_R_partyaffil_df,
+  contr_justify_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Justify\n(raw mean)",
+  "Figure: Achieving In-Party Political Goals — Meta-Perceptions",
+  color_A = c("Control R" = "midnightblue", "Treatment R" = "deepskyblue",
+              "Control D" = "dodgerblue",    "Treatment D" = "lightblue"))
+```
+```{r , echo=FALSE}
+p_justify_indiv
+p_justify_meta_R
+```
+
+### Scenario: If the other party wins the next election
+
+#### Models
+``` {r}
+# 1.1: form models for:
+# A: Individual SPV (Aggregated)
+lm_predict_indiv <- lm_robust(SPV_indiv_predict ~ condition_dummy * PID_dummy * PID_bin,
+                              data = data_clean, se_type = "HC2")
+# B: Meta-Perceptions of Republican SPV 
+lm_predict_meta_R <- lm_robust(SPV_meta_predict ~ condition_dummy * PID_dummy * PID_bin,
+                               data = data_clean, se_type = "HC2")
+# C: Individual SPV (Reps only)
+lm_R_predict <- lm_robust(spv_Rpredict ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+# D: Individual SPV (Dems only)
+lm_D_predict <- lm_robust(spv_Dpredict ~ condition_dummy * PID_bin,
+                          data = data_clean, se_type = "HC2")
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_predict_indiv),    digits = 3, format = "pipe", caption = "Individual SPV")
+knitr::kable(broom::tidy(lm_predict_meta_R),   digits = 3, format = "pipe", caption = "Meta-Perceptions Republican SPV")
+knitr::kable(broom::tidy(lm_R_predict),        digits = 3, format = "pipe", caption = "Individual SPV (Republicans Only)")
+knitr::kable(broom::tidy(lm_D_predict),        digits = 3, format = "pipe", caption = "Individual SPV (Democrats Only)")
+```
+
+#### Party ID (Dummy)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+emm_predict_indiv <- emmeans(lm_predict_indiv, ~ condition_dummy * PID_dummy,
+                             vcov. = vcov(lm_predict_indiv))
+emm_predict_indiv_df <- as.data.frame(confint(emm_predict_indiv)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_predict_indiv <- contrast(emm_predict_indiv,
+                                method = list(
+                                  "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                  "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                  "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                  "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_predict_indiv_df <- as.data.frame(confint(contr_predict_indiv))
+contr_table_predict_indiv <- summary(contr_predict_indiv) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_predict_indiv, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+emm_predict_meta_R <- emmeans(lm_predict_meta_R, ~ condition_dummy * PID_dummy,
+                              vcov. = vcov(lm_predict_meta_R))
+emm_predict_meta_R_df <- as.data.frame(confint(emm_predict_meta_R)) %>%
+  mutate(
+    condition_dummy = factor(condition_dummy, levels = c(0, 1),
+                             labels = c("Control", "Treatment")),
+    PID_dummy = factor(PID_dummy, levels = c(0, 1),
+                       labels = c("Democrat", "Republican")),
+    group = interaction(condition_dummy, PID_dummy))
+contr_predict_meta_R <- contrast(emm_predict_meta_R,
+                                 method = list(
+                                   "Control D vs. Control R"     = c(-1,  0,  1,  0),
+                                   "Control D vs. Treatment D"   = c(-1,  1,  0,  0),
+                                   "Control R vs. Treatment R"   = c( 0,  0, -1,  1),
+                                   "Treatment D vs. Treatment R" = c( 0, -1,  0,  1)))
+contr_predict_meta_R_df <- as.data.frame(confint(contr_predict_meta_R))
+contr_table_predict_meta_R <- summary(contr_predict_meta_R) |>
+  as.data.frame() |>
+  dplyr::select(contrast, estimate, SE, df, t.ratio, p.value)
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_predict_meta_R, format = "pipe")
+```
+
+#### Party ID (7-pt)
+``` {r}
+# form emmeans and contrast matrices for Individual SPV (Aggregated)
+predict_indiv_partyaffil <- lm_robust(SPV_indiv_predict ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_predict_indiv_partyaffil<- emmeans(predict_indiv_partyaffil, ~ condition_dummy * party_numeric,
+                                       at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                       vcov. = vcov(predict_indiv_partyaffil))
+contr_predict_indiv_partyaffil<- contrast(emm_predict_indiv_partyaffil,
+                                          method = list("Treatment - Control" = c(-1, 1)),
+                                          by = "party_numeric")
+contr_predict_indiv_partyaffil_df <- confint(contr_predict_indiv_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Individual Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_predict_indiv_partyaffil_df, format = "pipe")
+```
+``` {r}
+# form emmeans and contrast matrices for Meta-Perceptions of Republican SPV
+predict_meta_R_partyaffil <- lm_robust(SPV_meta_predict ~ condition_dummy * party_numeric, data = data_clean, se_type = "HC2")
+emm_predict_meta_R_partyaffil<- emmeans(predict_meta_R_partyaffil, ~ condition_dummy * party_numeric,
+                                        at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                        vcov. = vcov(predict_meta_R_partyaffil))
+contr_predict_meta_R_partyaffil<- contrast(emm_predict_meta_R_partyaffil,
+                                           method = list("Treatment - Control" = c(-1, 1)),
+                                           by = "party_numeric")
+contr_predict_meta_R_partyaffil_df <- confint(contr_predict_meta_R_partyaffil) |>
+  as.data.frame() |>
+  mutate(
+    party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                         labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")),
+    model = "Meta-Perceptions of Republicans' Ratings")
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_predict_meta_R_partyaffil_df, format = "pipe")
+```
+
+#### Party ID (7-pt) + Partisan Self-Concept
+``` {r}
+lm_predict_indiv_R_7 <- lm_robust(SPV_indiv_predict ~ condition_dummy * party_numeric * PID_bin,
+                                  data = data_clean, se_type = "HC2")
+emm_predict_indiv_R_7<- emmeans(lm_predict_indiv_R_7, ~ condition_dummy | party_numeric,
+                                at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                                vcov. = vcov(lm_predict_indiv_R_7))
+contr_predict_indiv_R_7<- contrast(emm_predict_indiv_R_7,
+                                   method = list("Treatment - Control" = c(-1, 1)),
+                                   by = "party_numeric")
+contr_predict_indiv_R_7_df <- as.data.frame(confint(contr_predict_indiv_R_7))
+contr_table_predict_indiv_R_7_df <- summary(contr_predict_indiv_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_predict_indiv_R_7_df, format = "pipe")
+```
+``` {r}
+lm_predict_meta_R_7 <- lm_robust(SPV_meta_predict ~ condition_dummy * party_numeric * PID_bin,
+                                 data = data_clean, se_type = "HC2")
+emm_predict_meta_R_7<- emmeans(lm_predict_meta_R_7, ~ condition_dummy | party_numeric,
+                               at = list(party_numeric = c(1, 2, 3, 5, 6, 7)),
+                               vcov. = vcov(lm_predict_meta_R_7))
+contr_predict_meta_R_7<- contrast(emm_predict_meta_R_7,
+                                  method = list("Treatment - Control" = c(-1, 1)),
+                                  by = "party_numeric")
+contr_predict_meta_R_7_df <- as.data.frame(confint(contr_predict_meta_R_7))
+contr_table_predict_meta_R_7_df <- summary(contr_predict_meta_R_7) |>
+  as.data.frame() |>
+  dplyr::select(contrast, party_numeric, estimate, SE, df, t.ratio, p.value) |>
+  mutate(party_label = factor(party_numeric, levels = c(1, 2, 3, 5, 6, 7),
+                              labels = c("Strong D","Weak D","Lean D","Lean R","Weak R","Strong R")))
+```
+``` {r, echo = FALSE}
+knitr::kable(contr_table_predict_meta_R_7_df, format = "pipe")
+```
+
+#### Factor models for panel plots
+``` {r}
+predict_indiv_factor <- lm_robust(SPV_indiv_predict ~ condition_dummy * factor(party_numeric),
+                                  data = data_clean, se_type = "HC2")
+emm_predict_indiv_factor <- emmeans(predict_indiv_factor, ~ condition_dummy | party_numeric,
+                                    vcov. = vcov(predict_indiv_factor))
+contr_predict_indiv_factor_df <- confint(contrast(emm_predict_indiv_factor,
+                                                  method = list("Treatment - Control" = c(-1, 1)),
+                                                  by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+predict_meta_R_factor <- lm_robust(SPV_meta_predict ~ condition_dummy * factor(party_numeric),
+                                   data = data_clean, se_type = "HC2")
+emm_predict_meta_R_factor <- emmeans(predict_meta_R_factor, ~ condition_dummy | party_numeric,
+                                     vcov. = vcov(predict_meta_R_factor))
+contr_predict_meta_R_factor_df <- confint(contrast(emm_predict_meta_R_factor,
+                                                   method = list("Treatment - Control" = c(-1, 1)),
+                                                   by = "party_numeric")) |>
+  as.data.frame() |>
+  mutate(party_numeric = as.numeric(as.character(party_numeric)))
+
+p_predict_indiv <- make_SPV_panels(
+  "SPV_indiv_predict",
+  contr_predict_indiv_partyaffil_df,
+  contr_predict_indiv_factor_df,
+  "Individual SPV: Predict\n(raw mean)",
+  "Figure: If Opposing Party Wins Next Election — Individual Ratings",
+  color_A = c("Control R" = "darkorchid", "Treatment R" = "plum",
+              "Control D" = "orchid",      "Treatment D" = "thistle"))
+
+p_predict_meta_R <- make_SPV_panels(
+  "SPV_meta_predict",
+  contr_predict_meta_R_partyaffil_df,
+  contr_predict_meta_R_factor_df,
+  "Meta-Perceptions of Republican SPV: Predict\n(raw mean)",
+  "Figure: If Opposing Party Wins Next Election — Meta-Perceptions",
+  color_A = c("Control R" = "darkorchid", "Treatment R" = "plum",
+              "Control D" = "orchid",      "Treatment D" = "thistle"))
+```
+```{r , echo=FALSE}
+p_predict_indiv
+p_predict_meta_R
+```
+
+
+
+## Binned Scenarios SPV 
+
+Secondarily to the scenario-specific models, I plan to combine the four scenario-specific questions and the two broad-based questions into two, distinct averages measuring individual and meta-perceptions of Republicans’ SPV. I will then apply the same Ordinary Least Squares (OLS) linear regression models with heteroskedasticity-robust standard errors to these aggregated variables, including the exact same covariates as for each of the six individual questions regarding SPV scenarios.
+
+*I deviated from the pre-analysis plan by removing the additional specified covariates from each model, as this simplifies the ability to draw conclusions about the average treatment effect. The only covariates included are PID_dummy, which represents the dichotomous effect of being a Democrat versus a Republican, and PID_bin, the grouped version of partisan self-concept. *
+
+### Create four baseline models
+``` {r}
+lm_indiv_scenario <- lm_robust(SPV_indiv_scenario ~ condition_dummy, data = data_clean)
+lm_indiv_broad <- lm_robust(SPV_indiv_broad ~ condition_dummy, data = data_clean)
+lm_meta_R_scenario <- lm_robust(SPV_meta_scenario ~ condition_dummy, data = data_clean)
+lm_meta_R_broad <- lm_robust(SPV_meta_broad ~ condition_dummy, data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_indiv_scenario), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_indiv_broad), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_meta_R_scenario), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_meta_R_broad), digits = 3, format = "pipe")
+```
+
+### INDIV_SCENARIO
+``` {r}
+# A: bivariate
+lm_indiv_1 <- lm(SPV_indiv_scenario ~ condition_dummy, data = data_clean)
+# B: multivariate
+lm_indiv_1_cov <- lm(SPV_indiv_scenario ~ condition_dummy * PID_dummy * PID_bin,
+                     data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_indiv_1), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_indiv_1_cov), digits = 3, format = "pipe")
+```
+
+### INDIV_BROAD
+``` {r}
+# A: bivariate
+lm_indiv_2 <- lm(SPV_indiv_broad ~ condition_dummy, data = data_clean)
+# B: multivariate
+lm_indiv_2_cov <- lm(SPV_indiv_broad ~ condition_dummy * PID_dummy * PID_bin,
+                     data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_indiv_2), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_indiv_2_cov), digits = 3, format = "pipe")
+```
+
+### META_R_SCENARIO
+``` {r}
+# A: bivariate
+lm_meta_R_1 <- lm(SPV_meta_scenario ~ condition_dummy, data = data_clean)
+# B: multivariate
+lm_meta_R_1_cov <- lm(SPV_meta_scenario ~ condition_dummy * PID_dummy * PID_bin,
+                      data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_meta_R_1), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_meta_R_1_cov), digits = 3, format = "pipe")
+```
+
+### META_R_BROAD
+``` {r}
+# A: bivariate
+lm_meta_R_2 <- lm(SPV_meta_broad ~ condition_dummy, data = data_clean)
+# B: multivariate
+lm_meta_R_2_cov <- lm(SPV_meta_broad ~ condition_dummy * PID_dummy * PID_bin,
+                     data = data_clean)
+```
+``` {r, echo = FALSE}
+knitr::kable(broom::tidy(lm_meta_R_2), digits = 3, format = "pipe")
+knitr::kable(broom::tidy(lm_meta_R_2_cov), digits = 3, format = "pipe")
+```
+
+
+## Independent-Samples T-Tests
+Lastly, in line with earlier work by Mernyk et al. (2022), I plan to perform three independent-samples t-tests comparing Republican to Democratic participants regarding their predicted and actual levels of support for political violence. The first t-test will compare Republicans’ reported individual SPV to Democrats’ meta-perceptions of Republicans’ SPV, while the second t-test will compare Republicans’ individual SPV to their own meta-perceptions of co-partisans’ SPV. The third t-test will compare meta-perceptions of Republicans’ SPV between Republicans and Democrats. I will use the standard p<.05 criteria in our two-tailed T-test to determine whether significant differences exist between individual support of partisan violence and meta-perceptions of Republicans’ support for partisan violence. For all t-tests, I plan to calculate the effect size as Cohen’s d.
+``` {r}
+# 8. outparty metaperceptions
+# 8.1: actual views of R vs. how D think R will respond
+t.test(na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_individual),
+       na.omit((data_clean %>% filter(party_numeric <= 3))$SPV_meta_outgroup))
+# 8.2: effect size
+cohen.d(na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_individual),
+       na.omit((data_clean %>% filter(party_numeric <= 3))$SPV_meta_outgroup))
+
+# 9. inparty metaperceptions
+# 9.1: actual views of R vs. how R think R will respond
+t.test(na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_individual),
+       na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_meta_ingroup))
+# 9.2: effect size
+cohen.d(na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_individual),
+        na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_meta_ingroup))
+
+# 10. are democrats' inaccuracies different from republicans' inaccuracies?
+# 10.1: how D think R will respond vs. how R think R will respond
+t.test(na.omit((data_clean %>% filter(party_numeric <= 3))$SPV_meta_outgroup),
+       na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_meta_ingroup))
+# 10.2: effect size
+cohen.d(na.omit((data_clean %>% filter(party_numeric <= 3))$SPV_meta_outgroup),
+        na.omit((data_clean %>% filter(party_numeric >= 4))$SPV_meta_ingroup))
+```
